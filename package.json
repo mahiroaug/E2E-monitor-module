@@ -1,0 +1,8 @@
+{
+  "name": "e2e-monitoring",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "E2E Monitoring root (minimal)"
+}
+

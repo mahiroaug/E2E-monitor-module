@@ -1,0 +1,43 @@
+{
+  "name": "E2E-monitor-module",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+
+  "image": "mcr.microsoft.com/vscode/devcontainers/typescript-node:1-22",
+  "features": {},
+  
+  "mounts": [
+    "source=${localEnv:HOME}/.aws,target=/home/node/.aws,type=bind,consistency=cached"
+  ],
+
+
+  "postCreateCommand": "bash .devcontainer/scripts/init.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "JuanBlanco.solidity",
+        "ms-vscode.vscode-typescript-next",
+        "ms-vscode.js-debug-nightly",
+        "dotenv.dotenv-vscode",
+        "VisualStudioExptTeam.vscodeintellicode",
+        "mikestead.dotenv",
+        "GitHub.copilot",
+        "GitHub.copilot-chat",
+        "Arjun.swagger-viewer",
+        "42Crunch.vscode-openapi",
+        "yzhang.markdown-all-in-one",
+        "yzane.markdown-pdf",
+        "DavidAnson.vscode-markdownlint",
+        "kddejong.vscode-cfn-lint",
+        "dbaeumer.vscode-eslint",
+        "mermade.openapi-lint",
+        "TakumiI.markdowntable",
+        "NomicFoundation.hardhat-solidity",
+        "bierner.markdown-mermaid",
+        "bpruitt-goddard.mermaid-markdown-syntax-highlighting",
+        "oderwat.indent-rainbow",
+        "mhutchie.git-graph",
+      ]
+    }
+  }
+}
