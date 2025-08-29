@@ -209,13 +209,13 @@ AWS SQSにデータを送信するには、以下の情報が必要です：
 
 ## 2025/04/22 MVP版
 
-- SQS : `E2E-module-log-aggregation-queue`
-- Lambda : `E2E-module-log-processor` version `v1`
+- SQS : `E2E-module-tx-sender`
+- Lambda : `E2E-module-tx-sender` version `v1`
 - Fireblocks : `OPTAGE_2 (Testnet)`
 - Fireblocks API-user : `API-mahiro-t2-signer`
 - Blockchain : `Polygon Amoy (chain_ID=80002)`
 - Smart Contract Owner : `0x084466a05dfeb359E57f985F1B0a1EbabBE77e9A`
-- Smart Contract (LogRecorderV2) : `0x2856f26889a2E2dD107D7099FeA3115eB54146d3`
-- [polygonscan(LogRecorderV2)](https://amoy.polygonscan.com/address/0x2856f26889a2E2dD107D7099FeA3115eB54146d3)
+- Smart Contract (E2eMonitor) : ``
+- [polygonscan(E2eMonitor)](https://amoy.polygonscan.com/address/)
 
 
