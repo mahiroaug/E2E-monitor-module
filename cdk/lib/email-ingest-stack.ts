@@ -44,14 +44,13 @@ export class EmailIngestStack extends Stack {
       },
     });
 
-    const s3ObjectCreatedRule = new Rule(this, 'S3ObjectCreatedEmlRule', {
+    const s3ObjectCreatedRule = new Rule(this, 'S3ObjectCreatedRule', {
       eventPattern: {
         source: ['aws.s3'],
         detailType: ['Object Created'],
         detail: {
           bucket: { name: [props.bucket.bucketName] },
-          object: { key: [{ suffix: '.eml' }] as any },
-        } as any,
+        },
       },
     });
     s3ObjectCreatedRule.addTarget(new LambdaTarget(this.parserFn));
