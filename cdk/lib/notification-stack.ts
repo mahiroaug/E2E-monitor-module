@@ -8,7 +8,10 @@ export class NotificationStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
-    this.topic = new Topic(this, 'AlertsTopic');
+    const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
+    this.topic = new Topic(this, 'AlertsTopic', {
+      topicName: `e2emm-alerts-${stage}`,
+    });
   }
 }
 

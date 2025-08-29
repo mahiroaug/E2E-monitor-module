@@ -131,6 +131,18 @@ class BlockchainService {
    */
   async initialize() {
     console.log('Initializing blockchain connection');
+
+    // 必須パラメータ検証
+    if (!this.apiKey || !this.apiSecret || !this.vaultAccountId) {
+      throw new Error('Missing Fireblocks credentials (apiKey/apiSecret/vaultAccountId)');
+    }
+    if (!this.contractAddress) {
+      throw new Error('Missing contract address (CA_E2E_MONITOR or SSM)');
+    }
+    if (!ethers.isAddress(this.contractAddress)) {
+      throw new Error(`Invalid contract address: ${this.contractAddress}`);
+    }
+
     console.log('Fireblocks VaultID:', this.vaultAccountId);
     console.log('E2eMonitor Contract:', this.contractAddress);
 
@@ -146,6 +158,20 @@ class BlockchainService {
 
     // ethers.jsとの連携
     this.provider = new ethers.BrowserProvider(fireblocksProvider);
+    // 接続性・チェーンIDの整合性チェック
+    try {
+      const chainIdHex = await this.provider.send('eth_chainId', []);
+      const chainId = typeof chainIdHex === 'string' ? parseInt(chainIdHex, 16) : Number(chainIdHex);
+      if (Number.isFinite(chainId)) {
+        console.log('Connected chainId:', chainId);
+        if (chainId !== CONSTANTS.CHAIN_ID) {
+          console.warn(`ChainId mismatch. expected=${CONSTANTS.CHAIN_ID}, actual=${chainId}`);
+        }
+      }
+    } catch (e) {
+      console.warn('Could not verify chain id via eth_chainId:', e && e.message ? e.message : String(e));
+    }
+
     this.signer = await this.provider.getSigner();
 
     // コントラクトインスタンスを作成
@@ -164,22 +190,28 @@ class BlockchainService {
 
     console.log(JSON.stringify({ message: 'Sending E2eMonitor.ping', correlationIdHex32, tagHex32 }, null, 2));
 
-    const senderAddress = await this.signer.getAddress();
-    const nonce = await this.provider.getTransactionCount(senderAddress);
-    const clientTimestamp = Math.floor(Date.now() / 1000);
+    try {
+      const senderAddress = await this.signer.getAddress();
+      const nonce = await this.provider.getTransactionCount(senderAddress);
+      const clientTimestamp = Math.floor(Date.now() / 1000);
 
-    // トランザクションを送信
-    const tx = await this.contract.ping(correlationIdHex32, tagHex32, clientTimestamp, nonce);
-    console.log('Transaction hash:', tx.hash);
+      // トランザクションを送信
+      const tx = await this.contract.ping(correlationIdHex32, tagHex32, clientTimestamp, nonce);
+      console.log('Transaction hash:', tx.hash);
 
-    // トランザクション完了を待機
-    const receipt = await tx.wait();
-    console.log('Transaction completed! Block number:', receipt.blockNumber);
+      // トランザクション完了を待機
+      const receipt = await tx.wait();
+      console.log('Transaction completed! Block number:', receipt.blockNumber);
 
-    return {
-      transactionHash: tx.hash,
-      blockNumber: receipt.blockNumber
-    };
+      return {
+        transactionHash: tx.hash,
+        blockNumber: receipt.blockNumber
+      };
+    } catch (err) {
+      // ethers v6 エラー整形
+      const message = (err && err.shortMessage) || (err && err.message) || String(err);
+      throw new Error(message);
+    }
   }
 }
 

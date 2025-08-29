@@ -10,13 +10,16 @@ export class StorageStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
+    const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
     this.bucket = new Bucket(this, 'EmailBucket', {
+      bucketName: `e2emm-email-bucket-${stage}`,
       removalPolicy: RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       eventBridgeEnabled: true,
     });
 
     this.table = new Table(this, 'ResultsTable', {
+      tableName: `e2emm-results-${stage}`,
       partitionKey: { name: 'correlationId', type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY,

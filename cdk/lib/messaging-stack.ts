@@ -16,12 +16,15 @@ export class MessagingStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
+    const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
     this.dlq = new Queue(this, 'Dlq', {
+      queueName: `e2emm-main-dlq-${stage}`,
       retentionPeriod: Duration.days(14),
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
     this.queue = new Queue(this, 'MainQueue', {
+      queueName: `e2emm-main-queue-${stage}`,
       visibilityTimeout: Duration.seconds(120),
       deadLetterQueue: { maxReceiveCount: 5, queue: this.dlq } as DeadLetterQueue,
     });
@@ -31,6 +34,7 @@ export class MessagingStack extends Stack {
       runtime: Runtime.NODEJS_20_X,
       entry: join(__dirname, '../../src/lambda/recordLogHandler.js'),
       handler: 'handler',
+      functionName: `e2emm-tx-sender-${stage}`,
       memorySize: 512,
       timeout: Duration.seconds(60),
       bundling: { minify: true, externalModules: ['aws-sdk'] },

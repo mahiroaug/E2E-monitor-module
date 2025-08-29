@@ -14,8 +14,8 @@
 
 フロー（要約）
 1) EventBridge が Step Functions を起動（`correlationId` 生成）
-2) Step Functions が SQS に試験メッセージ送信（`correlationId`, `contractAddress`, `tag` 等）
-3) tx-sender Lambda が `E2eMonitor.ping(correlationId, tag)` を送信（Fireblocks 経由）
+2) Step Functions が SQS に試験メッセージ送信（`correlationIdHex32`, `tagHex32`）
+3) tx-sender Lambda が `E2eMonitor.ping(correlationId, tag, clientTimestamp, nonce)` を送信（Fireblocks 経由で `clientTimestamp`/`nonce` を付与）
 4) 監視サービスがイベント検出→メール送信（本文に TxHash）
 5) SES→S3→email-ingest Lambda がメールを解析、`txHash`→エクスプローラAPI→イベント(`E2ePing`)の `correlationId` 突合→DynamoDB `SUCCESS` 記録
 6) Step Functions が DynamoDB をポーリングして成功検出で終了。未検出でタイムアウト→失敗ログ→SNS 通知
@@ -25,20 +25,19 @@
 ```
 .
 ├─ cdk/                         # IaC（AWS CDK v2 / TypeScript）
-│  ├─ bin/app.ts                # エントリ
+│  ├─ bin/app.ts
 │  └─ lib/
-│     ├─ email-ingest-stack.ts  # SES→S3→email-ingest Lambda
-│     ├─ messaging-stack.ts     # SQS(+DLQ)
-│     ├─ state-machine-stack.ts # Step Functions / EventBridge
-│     ├─ storage-stack.ts       # DynamoDB / S3（メール保存）
-│     └─ notification-stack.ts  # SNS / CloudWatch（アラーム）
-├─ contracts/                   # Hardhat 一式（src/contract）
-│  └─ contracts/E2eMonitor.sol  # event E2ePing / function ping
-├─ services/
-│  ├─ tx-sender/                # SQS→Fireblocks→E2eMonitor.ping（src/lambda 相当）
-│  └─ email-ingest/             # SES(S3)→メール解析→エクスプローラAPI→DDB
+│     ├─ email-ingest-stack.ts
+│     ├─ messaging-stack.ts
+│     ├─ state-machine-stack.ts
+│     ├─ storage-stack.ts
+│     └─ notification-stack.ts
+├─ src/
+│  ├─ contract/                 # Hardhat 一式（E2eMonitor.sol / Ignition など）
+│  ├─ lambda/                   # tx-sender（recordLogHandler.js）, email-ingest
+│  └─ deploy/                   # SSM 初期化スクリプト等
 ├─ docs/                        # アーキ/ランブック等
-└─ .devcontainer/               # 開発環境（AWS CLI/CDK 等のセットアップ）
+└─ README.md
 ```
 
 実体のソース配置は以下を参照してください:
@@ -50,9 +49,9 @@
 
 - 権限制御: `AccessControl`（`SENDER_ROLE` を付与した送信者のみ `ping` 可）
 - イベント:
-  - `event E2ePing(bytes32 indexed correlationId, address indexed sender, uint256 timestamp, bytes32 tag)`
+  - `event E2ePing(bytes32 indexed correlationId, address indexed sender, uint256 clientTimestamp, uint256 nonce, uint256 blockTimestamp, bytes32 tag)`
 - 関数:
-  - `function ping(bytes32 correlationId, bytes32 tag) external onlyRole(SENDER_ROLE)`
+  - `function ping(bytes32 correlationId, bytes32 tag, uint256 clientTimestamp, uint256 nonce) external onlyRole(SENDER_ROLE)`
 
 検証ロジックは TxHash→エクスプローラAPI（例: Polygonscan API）→イベント取得で `correlationId` を突合します。
 
@@ -61,18 +60,15 @@
 ```
 {
   "correlationIdHex32": "0x...64桁",
-  "contractAddress": "0xContract",
-  "tagHex32": "0x...64桁",
-  "minConfirmations": 0 | 1 | 2,  // 任意。email-ingest 判定は receipt 到達で十分なら 0
-  "network": "polygon-amoy"
+  "tagHex32": "0x...64桁"
 }
 ```
 
 ## 主要パラメータ（例：SSM/環境変数）
 
-- Fireblocks 送信系: `/E2E/fireblocks/api_key`, `/E2E/fireblocks/secret_key`, `/E2E/fireblocks/vault_id`
-- エクスプローラ API キー: `/E2E/explorer/api_key`（例: Polygonscan）
-- コントラクト: `/E2E/contract/e2e_monitor_address`
+- Fireblocks 送信系(SSM): `/E2E-module/fireblocks/api_key`, `/E2E-module/fireblocks/secret_key`, `/E2E-module/fireblocks/vault_id`
+- コントラクト(SSM): `/E2E-module/contract/e2e_monitor_address`
+- エクスプローラ API: 環境変数 `EXPLORER_API_URL`（例: `https://api-amoy.polygonscan.com/api`）, `EXPLORER_API_KEY`
 - SES 設定: 許可送信元/受信メールアドレス
 - 通知: SNS トピック ARN（CDK 出力でも可）
 - スケジュール/タイムアウト: Step Functions の待機/最大実行時間
@@ -89,8 +85,11 @@
    - デプロイ/ロール付与は Hardhat スクリプト/Ignition を用意（今後追加）
 4) CDK
    - `cd cdk && npm run build`
-   - 初回: `npx cdk bootstrap`
-   - デプロイ: `npm run deploy`
+   - 初回: `npx cdk bootstrap --context stage=dev`
+   - デプロイ例:
+     - `npx cdk deploy --all --context stage=dev`（開発）
+     - `npx cdk deploy --all --context stage=stg`（ステージング）
+     - `npx cdk deploy --all --context stage=prod`（本番）
 
 ## 運用・判定ロジック
 
@@ -104,7 +103,7 @@
   - Step Functions 実行ログ（`correlationId`）
   - SQS → tx-sender Lambda 実行ログ（Fireblocks 送信可否）
   - SES 受信/S3 保存の有無、email-ingest Lambda の解析ログ
-  - RPC 応答（`eth_getTransactionReceipt`）、Polygonscan 参照
+  - RPC 応答（`eth_getTransactionReceipt`）、Polygonscan 参照（`E2ePing` の `topics[1]` が `correlationId`）
 - 再実行: Step Functions を手動再実行、必要に応じて `correlationId` を変更
 
 ## 受け入れ条件
@@ -203,14 +202,32 @@ AWS SQSにデータを送信するには、以下の情報が必要です：
 - **CloudWatch Logs**: Lambda実行ログの確認
 - **SQS指標**: キューの状態監視
 - **DLQモニタリング**: 処理失敗メッセージの確認
+ - **カスタムメトリクス**: `E2E/EmailIngest Failures`（関数/理由次元）に対してアラーム設定
+
+## Step Functions 手動起動例（入力）
+
+```json
+{
+  "correlationId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "messageBody": "{\"correlationIdHex32\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"tagHex32\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+}
+```
+
+備考:
+- `messageBody` は JSON 文字列（ダブルクォートをエスケープ）。
+- `correlationId` は DDB での検索キー。`email-ingest` が `SUCCESS` を upsert すると検出される。
 
 ---
 
 
-## 2025/04/22 MVP版
+## 2025/08/29 MVP版（命名規則: `e2emm-*-<stage>`）
 
-- SQS : `E2E-module-tx-sender`
-- Lambda : `E2E-module-tx-sender` version `v1`
+- SQS : `e2emm-main-queue-<stage>` / DLQ: `e2emm-main-dlq-<stage>`
+- Lambda : `e2emm-tx-sender-<stage>`, `e2emm-email-ingest-<stage>`
+- DynamoDB : `e2emm-results-<stage>`
+- S3 : `e2emm-email-bucket-<stage>`
+- SNS : `e2emm-alerts-<stage>`
+- Step Functions : `e2emm-state-machine-<stage>`
 - Fireblocks : `OPTAGE_2 (Testnet)`
 - Fireblocks API-user : `API-mahiro-t2-signer`
 - Blockchain : `Polygon Amoy (chain_ID=80002)`

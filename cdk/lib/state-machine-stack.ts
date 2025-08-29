@@ -80,7 +80,9 @@ export class StateMachineStack extends Stack {
       retention: RetentionDays.ONE_WEEK,
     });
 
+    const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
     this.machine = new StateMachine(this, 'E2eMachine', {
+      stateMachineName: `e2emm-state-machine-${stage}`,
       definition: sendMessage.next(waitStart).next(getItemFirst).next(checkFound),
       timeout: Duration.minutes(5),
       logs: {

@@ -22,6 +22,37 @@ function streamToString(stream) {
   });
 }
 
+// CloudWatch Embedded Metric Format (EMF) で失敗メトリクスを出力
+function emitFailureMetric(reason) {
+  try {
+    const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME || 'email-ingest';
+    const metricPayload = {
+      _aws: {
+        Timestamp: Date.now(),
+        CloudWatchMetrics: [
+          {
+            Namespace: 'E2E/EmailIngest',
+            Dimensions: [['FunctionName']],
+            Metrics: [{ Name: 'Failures', Unit: 'Count' }],
+          },
+          {
+            Namespace: 'E2E/EmailIngest',
+            Dimensions: [['FunctionName', 'Reason']],
+            Metrics: [{ Name: 'Failures', Unit: 'Count' }],
+          },
+        ],
+      },
+      FunctionName: functionName,
+      Reason: reason,
+      Failures: 1,
+    };
+    console.log(JSON.stringify(metricPayload));
+  } catch (e) {
+    // メトリクス出力失敗時も処理は継続
+    console.warn('emitFailureMetric error:', e && e.message ? e.message : String(e));
+  }
+}
+
 // 簡易 quoted-printable デコード（最低限）
 function decodeQuotedPrintable(input) {
   if (!input) return '';
@@ -66,10 +97,11 @@ function extractCorrelationIdFromLogs(receipt) {
   if (!receipt || !Array.isArray(receipt.logs)) return null;
   const targetLogs = receipt.logs.filter((l) => (l.address || '').toLowerCase() === CONTRACT_ADDRESS);
   if (targetLogs.length === 0) return null;
-  const topics = targetLogs[0].topics || [];
-  // E2ePing の topics[1] が indexed correlationId(bytes32)
-  if (topics.length >= 2 && /^0x[0-9a-fA-F]{64}$/.test(topics[1])) {
-    return topics[1];
+  for (const log of targetLogs) {
+    const topics = Array.isArray(log.topics) ? log.topics : [];
+    if (topics.length >= 2 && /^0x[0-9a-fA-F]{64}$/.test(topics[1])) {
+      return topics[1];
+    }
   }
   return null;
 }
@@ -91,28 +123,44 @@ exports.handler = async (event) => {
 
   const records = event.Records || [];
   for (const r of records) {
-    const bucket = r.s3.bucket.name;
-    const key = decodeURIComponent(r.s3.object.key.replace(/\+/g, ' '));
+    try {
+      const bucket = r.s3.bucket.name;
+      const key = decodeURIComponent(r.s3.object.key.replace(/\+/g, ' '));
 
-    const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const raw = await streamToString(obj.Body);
+      const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      const raw = await streamToString(obj.Body);
 
-    // quoted-printable 部分のデコード（雑だがメール全体に適用）
-    const text = decodeQuotedPrintable(raw);
-    const txHash = extractTxHashFromText(text);
-    if (!txHash) {
-      console.warn('TxHash not found in email:', { bucket, key });
-      continue;
+      // quoted-printable 部分のデコード（雑だがメール全体に適用）
+      const text = decodeQuotedPrintable(raw);
+      const txHash = extractTxHashFromText(text);
+      if (!txHash) {
+        console.warn('TxHash not found in email:', { bucket, key });
+        emitFailureMetric('TxHashNotFound');
+        continue;
+      }
+
+      let receipt;
+      try {
+        receipt = await fetchReceiptFromExplorer(txHash);
+      } catch (e) {
+        console.warn('Explorer API error:', e && e.message ? e.message : String(e));
+        emitFailureMetric('ExplorerError');
+        continue;
+      }
+
+      const correlationId = extractCorrelationIdFromLogs(receipt);
+      if (!correlationId) {
+        console.warn('CorrelationId not found in logs:', { txHash });
+        emitFailureMetric('CorrelationIdNotFound');
+        continue;
+      }
+
+      await putResultItem(correlationId, txHash);
+    } catch (e) {
+      console.warn('Unexpected processing error:', e && e.message ? e.message : String(e));
+      emitFailureMetric('UnexpectedError');
+      // 1レコード失敗でも他は処理継続
     }
-
-    const receipt = await fetchReceiptFromExplorer(txHash);
-    const correlationId = extractCorrelationIdFromLogs(receipt);
-    if (!correlationId) {
-      console.warn('CorrelationId not found in logs:', { txHash });
-      continue;
-    }
-
-    await putResultItem(correlationId, txHash);
   }
 
   return { ok: true };
