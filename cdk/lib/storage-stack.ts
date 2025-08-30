@@ -1,3 +1,11 @@
+/**
+ * StorageStack
+ *
+ * 本スタックで参照される設定:
+ * - context 'stage'（dev|stg|prod）: 物理名サフィックスに使用
+ *
+ * 本スタック内で process.env から直接読み込む環境変数はありません。
+ */
 import { Stack, StackProps, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';

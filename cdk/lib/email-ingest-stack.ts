@@ -1,3 +1,12 @@
+/**
+ * EmailIngestStack
+ *
+ * 本スタックで参照される設定:
+ * - context 'stage'（dev|stg|prod）: Lambda名/ロググループ名/メトリクス次元
+ * - env CA_E2E_MONITOR        : 契約アドレス（任意・空可）
+ * - env EXPLORER_API_URL      : エクスプローラAPI URL（既定 Polygonscan互換）
+ * - env EXPLORER_API_KEY      : エクスプローラAPI Key（任意）
+ */
 import { Duration, Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';

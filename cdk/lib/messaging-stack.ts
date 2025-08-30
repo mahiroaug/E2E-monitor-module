@@ -1,3 +1,10 @@
+/**
+ * MessagingStack
+ *
+ * 本スタックで参照される設定:
+ * - context 'stage'（dev|stg|prod）: SQS/Lambda 名称サフィックス
+ * - env SSM_PREFIX: Lambda 環境変数で参照（既定 /E2E-module/）
+ */
 import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Queue, DeadLetterQueue } from 'aws-cdk-lib/aws-sqs';

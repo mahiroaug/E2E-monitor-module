@@ -1,3 +1,9 @@
+/**
+ * NotificationStack
+ *
+ * 本スタックで参照される設定:
+ * - context 'stage'（dev|stg|prod）: SNS トピック名サフィックス
+ */
 import { Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Topic } from 'aws-cdk-lib/aws-sns';

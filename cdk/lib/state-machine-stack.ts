@@ -1,3 +1,10 @@
+/**
+ * StateMachineStack
+ *
+ * 本スタックで参照される設定:
+ * - context 'stage'（dev|stg|prod）: ステートマシン名サフィックス
+ * - EventBridge ルールは論理名のみ（必要に応じて ruleName 付与可）
+ */
 import { Duration, Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Queue } from 'aws-cdk-lib/aws-sqs';
