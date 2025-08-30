@@ -14,6 +14,7 @@ const RESULTS_TABLE = process.env.RESULTS_TABLE || '';
 const EXPLORER_API_URL = process.env.EXPLORER_API_URL || '';
 const EXPLORER_API_KEY = process.env.EXPLORER_API_KEY || '';
 const CONTRACT_ADDRESS = (process.env.CONTRACT_ADDRESS || '').toLowerCase();
+const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
@@ -21,6 +22,27 @@ const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
 
 const s3 = new S3Client({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+// ロガー（JSON一貫出力）
+const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+function shouldLog(level) {
+  const lv = LEVELS[level] || LEVELS.info;
+  const cur = LEVELS[LOG_LEVEL] || LEVELS.info;
+  return lv >= cur;
+}
+function log(level, message, details) {
+  if (!shouldLog(level)) return;
+  const rec = { level, message, details: details || undefined, timestamp: new Date().toISOString() };
+  if (level === 'error') console.error(JSON.stringify(rec));
+  else if (level === 'warn') console.warn(JSON.stringify(rec));
+  else console.log(JSON.stringify(rec));
+}
+const logger = {
+  debug: (m, d) => log('debug', m, d),
+  info: (m, d) => log('info', m, d),
+  warn: (m, d) => log('warn', m, d),
+  error: (m, d) => log('error', m, d),
+};
 
 function streamToString(stream) {
   return new Promise((resolve, reject) => {
@@ -58,7 +80,7 @@ function emitFailureMetric(reason) {
     console.log(JSON.stringify(metricPayload));
   } catch (e) {
     // メトリクス出力失敗時も処理は継続
-    console.warn('emitFailureMetric error:', e && e.message ? e.message : String(e));
+    logger.warn('emitFailureMetric error', { error: e && e.message ? e.message : String(e) });
   }
 }
 
@@ -74,15 +96,18 @@ function decodeQuotedPrintable(input) {
 
 function extractTxHashFromText(text) {
   if (!text) return null;
-  // 1) 直接 0x64桁
-  const direct = text.match(/0x[a-fA-F0-9]{64}/);
-  if (direct) return direct[0];
-  // 2) エクスプローラURLの末尾
+  // 1) エクスプローラURLの末尾（最優先）
   const url = text.match(/https?:\/\/\S*?\/tx\/0x[a-fA-F0-9]{64}/);
   if (url) {
     const m = url[0].match(/0x[a-fA-F0-9]{64}/);
     if (m) return m[0];
   }
+  // 2) ラベル付き "TxID: 0x..."（テキスト本文）
+  const labeled = text.match(/TxID\s*:\s*(0x[a-fA-F0-9]{64})/i);
+  if (labeled) return labeled[1];
+  // 3) 直接 0x64桁（最後の手段。EventIDなどの誤拾いの可能性）
+  const direct = text.match(/0x[a-fA-F0-9]{64}/);
+  if (direct) return direct[0];
   return null;
 }
 
@@ -93,7 +118,13 @@ async function fetchReceiptFromExplorer(txHash) {
   url.searchParams.set('action', 'eth_getTransactionReceipt');
   url.searchParams.set('txhash', txHash);
   if (EXPLORER_API_KEY) url.searchParams.set('apikey', EXPLORER_API_KEY);
-
+  // デバッグ用にAPI呼び出しの概要を出力（キーは出さない）
+  logger.debug('Explorer request', {
+    base: EXPLORER_API_URL,
+    module: 'proxy',
+    action: 'eth_getTransactionReceipt',
+    txhash: txHash,
+  });
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`Explorer API error: ${res.status}`);
   const body = await res.json();
@@ -125,16 +156,41 @@ async function putResultItem(correlationId, txHash) {
   await ddb.send(new PutCommand({ TableName: RESULTS_TABLE, Item: item }));
 }
 
-exports.handler = async (event) => {
+function extractS3Events(evt) {
+  const out = [];
+  // S3 Event Notification (Records[])
+  if (Array.isArray(evt?.Records) && evt.Records.length > 0) {
+    for (const r of evt.Records) {
+      if (r?.s3?.bucket?.name && r?.s3?.object?.key) {
+        out.push({ bucket: r.s3.bucket.name, key: r.s3.object.key });
+      }
+    }
+  }
+  // EventBridge S3 event (source=aws.s3)
+  if (evt?.source === 'aws.s3' && evt?.detail?.bucket?.name && evt?.detail?.object?.key) {
+    out.push({ bucket: evt.detail.bucket.name, key: evt.detail.object.key });
+  }
+  return out;
+}
+
+exports.handler = async (event, context) => {
+  const requestId = context && context.awsRequestId ? context.awsRequestId : undefined;
+  const extracted = extractS3Events(event);
+  logger.info('email-ingest invoked', { requestId, recordCount: extracted.length, source: event?.source || undefined });
   if (!RESULTS_TABLE) throw new Error('Missing RESULTS_TABLE');
   if (!EXPLORER_API_URL) throw new Error('Missing EXPLORER_API_URL');
   if (!CONTRACT_ADDRESS) throw new Error('Missing CONTRACT_ADDRESS');
 
-  const records = event.Records || [];
-  for (const r of records) {
+  if (extracted.length === 0) {
+    logger.warn('No S3 records in event (unexpected)');
+    return { ok: true, processed: 0 };
+  }
+
+  for (const rec of extracted) {
     try {
-      const bucket = r.s3.bucket.name;
-      const key = decodeURIComponent(r.s3.object.key.replace(/\+/g, ' '));
+      const bucket = rec.bucket;
+      const key = decodeURIComponent(String(rec.key).replace(/\+/g, ' '));
+      logger.info('Processing S3 object', { bucket, key });
 
       const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
       const raw = await streamToString(obj.Body);
@@ -143,35 +199,46 @@ exports.handler = async (event) => {
       const text = decodeQuotedPrintable(raw);
       const txHash = extractTxHashFromText(text);
       if (!txHash) {
-        console.warn('TxHash not found in email:', { bucket, key });
+        logger.warn('TxHash not found in email', { bucket, key });
         emitFailureMetric('TxHashNotFound');
         continue;
       }
+      logger.info('TxHash extracted', { txHash });
 
       let receipt;
       try {
         receipt = await fetchReceiptFromExplorer(txHash);
       } catch (e) {
-        console.warn('Explorer API error:', e && e.message ? e.message : String(e));
+        logger.warn('Explorer API error', { error: e && e.message ? e.message : String(e), txHash });
         emitFailureMetric('ExplorerError');
         continue;
       }
+      logger.debug('Explorer receipt fetched');
 
       const correlationId = extractCorrelationIdFromLogs(receipt);
       if (!correlationId) {
-        console.warn('CorrelationId not found in logs:', { txHash });
+        logger.warn('CorrelationId not found in logs', { txHash });
         emitFailureMetric('CorrelationIdNotFound');
         continue;
       }
+      logger.info('CorrelationId extracted', { correlationId });
 
-      await putResultItem(correlationId, txHash);
+      try {
+        logger.info('Putting item to DynamoDB', { table: RESULTS_TABLE });
+        await putResultItem(correlationId, txHash);
+        logger.info('DynamoDB write success');
+      } catch (e) {
+        logger.error('DynamoDB PutItem failed', { error: e && e.message ? e.message : String(e) });
+        emitFailureMetric('DdbError');
+        continue;
+      }
     } catch (e) {
-      console.warn('Unexpected processing error:', e && e.message ? e.message : String(e));
+      logger.error('Unexpected processing error', { error: e && e.message ? e.message : String(e) });
       emitFailureMetric('UnexpectedError');
       // 1レコード失敗でも他は処理継続
     }
   }
-
+  logger.info('email-ingest finished');
   return { ok: true };
 };
 

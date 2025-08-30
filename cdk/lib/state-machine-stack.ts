@@ -38,8 +38,7 @@ export class StateMachineStack extends Stack {
     const useExistingCorrelationId = new Pass(this, 'UseExistingCorrelationId');
     const generateCorrelationId = new Pass(this, 'GenerateCorrelationId', {
       parameters: {
-        'correlationId.$': JsonPath.uuid(),
-        'messageBody.$': JsonPath.stringAt('$.messageBody'),
+        correlationId: JsonPath.uuid(),
       },
     });
 
@@ -63,13 +62,24 @@ export class StateMachineStack extends Stack {
       payloadResponseOnly: true,
     });
 
+    // Ensure tagSeed exists (fallback to default when missing)
+    const setDefaultTagSeed = new Pass(this, 'SetDefaultTagSeed', {
+      parameters: {
+        tagSeed: 'default',
+        correlationId: JsonPath.stringAt('$.correlationId'),
+      },
+    });
+    const tagSeedOk = new Pass(this, 'UseExistingTagSeed');
+
     // Adopt hex32 into root correlationId and messageBody from prep
     const adoptPreparedValues = new Pass(this, 'AdoptPreparedValues', {
       parameters: {
-        'correlationId.$': JsonPath.stringAt('$.prep.correlationIdHex32'),
-        'messageBody.$': JsonPath.stringAt('$.prep.messageBody'),
+        correlationId: JsonPath.stringAt('$.prep.correlationIdHex32'),
+        messageBody: JsonPath.stringAt('$.prep.messageBody'),
       },
     });
+
+    // NOTE: For DynamoDB AttributeValue, avoid nested '.$' by using intrinsic formatting
 
     const sendMessage = new CallAwsService(this, 'Send SQS Message', {
       service: 'sqs',
@@ -79,6 +89,7 @@ export class StateMachineStack extends Stack {
         MessageBody: JsonPath.stringAt('$.messageBody'),
       },
       iamResources: ['*'],
+      resultPath: JsonPath.DISCARD,
     });
 
     const waitStart = new Wait(this, 'WaitForEmail', {
@@ -91,7 +102,9 @@ export class StateMachineStack extends Stack {
       parameters: {
         TableName: props.table.tableName,
         Key: {
-          correlationId: { 'S.$': JsonPath.stringAt('$.correlationId') },
+          correlationId: {
+            S: JsonPath.format('{}', JsonPath.stringAt('$.correlationId')),
+          },
         },
         ConsistentRead: true,
       },
@@ -111,7 +124,9 @@ export class StateMachineStack extends Stack {
       parameters: {
         TableName: props.table.tableName,
         Key: {
-          correlationId: { 'S.$': JsonPath.stringAt('$.correlationId') },
+          correlationId: {
+            S: JsonPath.format('{}', JsonPath.stringAt('$.correlationId')),
+          },
         },
         ConsistentRead: true,
       },
@@ -135,6 +150,10 @@ export class StateMachineStack extends Stack {
         .when(Condition.isPresent('$.correlationId'), useExistingCorrelationId)
         .otherwise(generateCorrelationId)
         .afterwards()
+        .next(new Choice(this, 'HasTagSeed?')
+          .when(Condition.isPresent('$.tagSeed'), tagSeedOk)
+          .otherwise(setDefaultTagSeed)
+          .afterwards())
         .next(prepareMessage)
         .next(adoptPreparedValues)
         .next(sendMessage)
@@ -168,14 +187,8 @@ export class StateMachineStack extends Stack {
       enabled: false,
     });
     rule.addTarget(new SfnStateMachine(this.machine, {
-      input: RuleTargetInput.fromObject({
-        // NOTE: Replace these fields or trigger manually with proper input
-        correlationId: 'REPLACE_WITH_CORRELATION_ID_KEY',
-        messageBody: JSON.stringify({
-          correlationIdHex32: '0x' + 'a'.repeat(64),
-          tagHex32: '0x' + 'b'.repeat(64)
-        })
-      }),
+      // 入力不要（State Machine 内でUUID/既定tagSeedを生成）
+      input: RuleTargetInput.fromObject({}),
     }));
   }
 }
