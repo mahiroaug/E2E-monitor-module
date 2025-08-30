@@ -160,7 +160,7 @@ export class StateMachineStack extends Stack {
         .next(waitStart)
         .next(getItemFirst)
         .next(checkFound),
-      timeout: Duration.minutes(5),
+      timeout: Duration.minutes(60),
       logs: {
         destination: logGroup,
         level: LogLevel.ALL,
