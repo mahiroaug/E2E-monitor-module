@@ -1,10 +1,28 @@
 #!/bin/bash
 
 # SSMパラメータの設定スクリプト
-# .envファイルと秘密鍵ファイルからFireblocksの設定を読み込んでSSMに保存します
-# 使用法: ./01_setup-ssm-parameters.sh [AWS_PROFILE]
-# 環境変数:
-#   CA_E2E_MONITOR : E2eMonitor コントラクトアドレス（必須）
+#
+# 概要:
+# - プロジェクトルートの .env と秘密鍵ファイルを読み込み、SSM Parameter Store に登録します。
+# - Fireblocks 機密情報は SecureString、非機密は String として登録します。
+#
+# 使用法:
+#   ./01_setup-ssm-parameters.sh [AWS_PROFILE]
+#   例) ./01_setup-ssm-parameters.sh dev_mtools
+#
+# 参照する .env キー（必須）:
+#   FIREBLOCKS_API_KEY         : Fireblocks API Key
+#   FIREBLOCKS_SECRET_KEY_FILE : Fireblocks API Secret のファイルパス（相対 or 絶対）
+#   FIREBLOCKS_VID_DEPLOYER    : Fireblocks Vault Account ID
+#   CA_E2E_MONITOR             : E2eMonitor コントラクトアドレス（0x...）
+#   EXPLORER_API_KEY           : エクスプローラ（例: Polygonscan）APIキー
+#
+# 登録される SSM パラメータ名:
+#   /E2E-module/fireblocks/api_key        (SecureString)
+#   /E2E-module/fireblocks/secret_key     (SecureString)
+#   /E2E-module/fireblocks/vault_id       (String)
+#   /E2E-module/contract/e2e_monitor_address (String)
+#   /E2E-module/explorer/api_key          (SecureString)
 
 set -e
 
@@ -49,6 +67,12 @@ fi
 CA_E2E_MONITOR="${CA_E2E_MONITOR:-${CA_E2E_MONITOR:-}}"
 if [ -z "$CA_E2E_MONITOR" ]; then
   echo "Error: CA_E2E_MONITOR is not set (.env or environment)"
+  exit 1
+fi
+
+# Explorer API Key の確認
+if [ -z "$EXPLORER_API_KEY" ]; then
+  echo "Error: EXPLORER_API_KEY is not set in .env file"
   exit 1
 fi
 
@@ -115,6 +139,15 @@ aws ssm put-parameter \
   --overwrite \
   $AWS_PROFILE_OPTION
 
+# Explorer API Key (SecureString)
+aws ssm put-parameter \
+  --name "/E2E-module/explorer/api_key" \
+  --value "$EXPLORER_API_KEY" \
+  --type "SecureString" \
+  --description "Explorer API Key" \
+  --overwrite \
+  $AWS_PROFILE_OPTION
+
 echo "SSM parameters have been set up successfully."
 echo ""
 echo "Parameter names:"
@@ -122,3 +155,4 @@ echo "- /E2E-module/fireblocks/api_key"
 echo "- /E2E-module/fireblocks/secret_key"
 echo "- /E2E-module/fireblocks/vault_id"
 echo "- /E2E-module/contract/e2e_monitor_address"
+echo "- /E2E-module/explorer/api_key"
