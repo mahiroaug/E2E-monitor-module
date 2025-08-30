@@ -1,3 +1,12 @@
+/**
+ * email-ingest Lambda
+ *
+ * 役割: S3に保存された受信メールからTxHashを抽出し、エクスプローラAPIで
+ *       E2ePingイベントを照会して correlationId を取得。DynamoDBに結果を記録し、
+ *       失敗時はEMFメトリクスを出力してアラーム連携する。
+ * トリガー: EventBridge（S3 Object Created for email bucket）
+ * 出力: DynamoDB `e2emm-results-<stage>` に upsert（キー: correlationId）
+ */
 'use strict';
 
 // 環境変数

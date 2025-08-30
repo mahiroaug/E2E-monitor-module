@@ -4,7 +4,7 @@
  * 前提:
  * - プロジェクトルートに .env を配置（本スクリプトは .env を自動探索）
  * - 実行アカウントは E2eMonitor の DEFAULT_ADMIN_ROLE（=デプロイヤ）であること
- * - 必須ENV: FIREBLOCKS_SECRET_KEY_FILE, FIREBLOCKS_API_KEY, FIREBLOCKS_VID_DEPLOYER, CA_E2E_MONITOR
+ * - 必須ENV: FIREBLOCKS_SECRET_KEY_FILE, FIREBLOCKS_API_KEY, FIREBLOCKS_VID_PINGER, CA_E2E_MONITOR
  * - 任意ENV: RPC_URL(既定 https://rpc-amoy.polygon.technology), CHAIN_ID(既定 80002)
  *
  * 実行例:
@@ -58,7 +58,7 @@ async function main(roleName, targetAddress) {
 
   const secretKeyFile = requireEnv('FIREBLOCKS_SECRET_KEY_FILE');
   const fireblocksApiKey = requireEnv('FIREBLOCKS_API_KEY');
-  const vaultAccountId = requireEnv('FIREBLOCKS_VID_DEPLOYER');
+  const vaultAccountId = requireEnv('FIREBLOCKS_VID_PINGER');
   const contractAddress = requireEnv('CA_E2E_MONITOR');
 
   const privateKeyContent = fs.readFileSync(path.resolve(__dirname, '../../../', secretKeyFile), 'utf8');
@@ -99,7 +99,7 @@ async function main(roleName, targetAddress) {
       console.log('Already granted. Nothing to do.');
       return;
     }
-  } catch (_) {}
+  } catch (_) { }
 
   const tx = await contract.grantRole(role, targetAddress);
   console.log('Tx hash:', tx.hash);
@@ -110,7 +110,7 @@ async function main(roleName, targetAddress) {
   try {
     const ok = await contract.hasRole(role, targetAddress);
     console.log('hasRole after grant:', ok);
-  } catch (_) {}
+  } catch (_) { }
 }
 
 const args = process.argv.slice(2);

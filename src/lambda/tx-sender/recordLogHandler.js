@@ -34,7 +34,7 @@ const CONSTANTS = {
 const SSM_PARAMS = {
   FIREBLOCKS_API_KEY: `${CONSTANTS.SSM_PREFIX}fireblocks/api_key`,
   FIREBLOCKS_API_SECRET: `${CONSTANTS.SSM_PREFIX}fireblocks/secret_key`,
-  FIREBLOCKS_VID_DEPLOYER: `${CONSTANTS.SSM_PREFIX}fireblocks/vault_id`,
+  FIREBLOCKS_VID_PINGER: `${CONSTANTS.SSM_PREFIX}fireblocks/vault_id`,
   E2E_MONITOR_ADDRESS: `${CONSTANTS.SSM_PREFIX}contract/e2e_monitor_address`
 };
 
@@ -87,7 +87,7 @@ class ParameterStore {
     const [apiKey, apiSecret, vaultAccountId] = await Promise.all([
       this.getParameter(SSM_PARAMS.FIREBLOCKS_API_KEY),
       this.getParameter(SSM_PARAMS.FIREBLOCKS_API_SECRET),
-      this.getParameter(SSM_PARAMS.FIREBLOCKS_VID_DEPLOYER)
+      this.getParameter(SSM_PARAMS.FIREBLOCKS_VID_PINGER)
     ]);
 
     // コントラクトアドレスは環境変数優先、なければ SSM

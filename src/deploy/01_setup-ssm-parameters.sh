@@ -13,7 +13,7 @@
 # 参照する .env キー（必須）:
 #   FIREBLOCKS_API_KEY         : Fireblocks API Key
 #   FIREBLOCKS_SECRET_KEY_FILE : Fireblocks API Secret のファイルパス（相対 or 絶対）
-#   FIREBLOCKS_VID_DEPLOYER    : Fireblocks Vault Account ID
+#   FIREBLOCKS_VID_PINGER      : Fireblocks Vault Account ID (tx sender)
 #   CA_E2E_MONITOR             : E2eMonitor コントラクトアドレス（0x...）
 #   EXPLORER_API_KEY           : エクスプローラ（例: Polygonscan）APIキー
 #
@@ -58,8 +58,8 @@ if [ -z "$FIREBLOCKS_SECRET_KEY_FILE" ]; then
   exit 1
 fi
 
-if [ -z "$FIREBLOCKS_VID_DEPLOYER" ]; then
-  echo "Error: FIREBLOCKS_VID_DEPLOYER is not set in .env file"
+if [ -z "$FIREBLOCKS_VID_PINGER" ]; then
+  echo "Error: FIREBLOCKS_VID_PINGER is not set in .env file"
   exit 1
 fi
 
@@ -89,7 +89,7 @@ FIREBLOCKS_API_SECRET=$(cat "$SECRET_KEY_FILE")
 echo "Configuration loaded successfully."
 echo "Fireblocks API Key: ${FIREBLOCKS_API_KEY:0:5}..."
 echo "Fireblocks API Secret: [読み込み完了]"
-echo "Fireblocks Vault ID: $FIREBLOCKS_VID_DEPLOYER"
+echo "Fireblocks Vault ID: $FIREBLOCKS_VID_PINGER"
 echo "E2eMonitor Contract Address: $CA_E2E_MONITOR"
 
 # 設定内容を確認
@@ -124,7 +124,7 @@ aws ssm put-parameter \
 # Fireblocks Vault ID (String)
 aws ssm put-parameter \
   --name "/E2E-module/fireblocks/vault_id" \
-  --value "$FIREBLOCKS_VID_DEPLOYER" \
+  --value "$FIREBLOCKS_VID_PINGER" \
   --type "String" \
   --description "Fireblocks Vault ID" \
   --overwrite \

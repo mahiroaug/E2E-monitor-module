@@ -10,13 +10,17 @@ import { Construct } from 'constructs';
 import { Queue } from 'aws-cdk-lib/aws-sqs';
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Topic } from 'aws-cdk-lib/aws-sns';
-import { StateMachine, LogLevel, JsonPath, Wait, WaitTime, LogOptions, Choice, Condition, Succeed } from 'aws-cdk-lib/aws-stepfunctions';
-import { CallAwsService } from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import { StateMachine, LogLevel, JsonPath, Wait, WaitTime, LogOptions, Choice, Condition, Succeed, Pass } from 'aws-cdk-lib/aws-stepfunctions';
+import { CallAwsService, LambdaInvoke } from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Rule, Schedule, RuleTargetInput } from 'aws-cdk-lib/aws-events';
 import { SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { TaskInput } from 'aws-cdk-lib/aws-stepfunctions';
+import { join } from 'path';
 
 export interface StateMachineStackProps extends StackProps {
   queue: Queue;
@@ -29,6 +33,43 @@ export class StateMachineStack extends Stack {
 
   constructor(scope: Construct, id: string, props: StateMachineStackProps) {
     super(scope, id, props);
+
+    // If correlationId is not provided in input, generate one (UUID)
+    const useExistingCorrelationId = new Pass(this, 'UseExistingCorrelationId');
+    const generateCorrelationId = new Pass(this, 'GenerateCorrelationId', {
+      parameters: {
+        'correlationId.$': JsonPath.uuid(),
+        'messageBody.$': JsonPath.stringAt('$.messageBody'),
+      },
+    });
+
+    // Prepare message body (build bytes32 values) via Lambda
+    const prepareMessageFn = new NodejsFunction(this, 'PrepareMessageFn', {
+      runtime: Runtime.NODEJS_20_X,
+      entry: join(__dirname, '../../src/lambda/prepare-message/index.js'),
+      handler: 'handler',
+      memorySize: 256,
+      timeout: Duration.seconds(10),
+      bundling: { minify: true, externalModules: ['aws-sdk'] },
+    });
+
+    const prepareMessage = new LambdaInvoke(this, 'PrepareMessage', {
+      lambdaFunction: prepareMessageFn,
+      payload: TaskInput.fromObject({
+        correlationId: JsonPath.stringAt('$.correlationId'),
+        tagSeed: JsonPath.stringAt('$.tagSeed'),
+      }),
+      resultPath: '$.prep',
+      payloadResponseOnly: true,
+    });
+
+    // Adopt hex32 into root correlationId and messageBody from prep
+    const adoptPreparedValues = new Pass(this, 'AdoptPreparedValues', {
+      parameters: {
+        'correlationId.$': JsonPath.stringAt('$.prep.correlationIdHex32'),
+        'messageBody.$': JsonPath.stringAt('$.prep.messageBody'),
+      },
+    });
 
     const sendMessage = new CallAwsService(this, 'Send SQS Message', {
       service: 'sqs',
@@ -90,7 +131,16 @@ export class StateMachineStack extends Stack {
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
     this.machine = new StateMachine(this, 'E2eMachine', {
       stateMachineName: `e2emm-state-machine-${stage}`,
-      definition: sendMessage.next(waitStart).next(getItemFirst).next(checkFound),
+      definition: new Choice(this, 'HasCorrelationId?')
+        .when(Condition.isPresent('$.correlationId'), useExistingCorrelationId)
+        .otherwise(generateCorrelationId)
+        .afterwards()
+        .next(prepareMessage)
+        .next(adoptPreparedValues)
+        .next(sendMessage)
+        .next(waitStart)
+        .next(getItemFirst)
+        .next(checkFound),
       timeout: Duration.minutes(5),
       logs: {
         destination: logGroup,

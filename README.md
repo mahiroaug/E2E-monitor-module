@@ -34,7 +34,7 @@
 │     └─ notification-stack.ts
 ├─ src/
 │  ├─ contract/                 # Hardhat 一式（E2eMonitor.sol / Ignition など）
-│  ├─ lambda/                   # tx-sender（recordLogHandler.js）, email-ingest
+│  ├─ lambda/                   # tx-sender（tx-sender/index.js）, email-ingest
 │  └─ deploy/                   # SSM 初期化スクリプト等
 ├─ docs/                        # アーキ/ランブック等
 └─ README.md
@@ -57,12 +57,6 @@
 
 ## SQS メッセージ（試験 Tx 指示）
 
-```
-{
-  "correlationIdHex32": "0x...64桁",
-  "tagHex32": "0x...64桁"
-}
-```
 
 ## 主要パラメータ（例：SSM/環境変数）
 
@@ -76,20 +70,54 @@
 ## デプロイ手順（開発環境）
 
 1) devcontainer を開く（初回で AWS CLI / CDK がインストールされます）
-2) 依存インストール
+2) .env を作成
+3) SSM にパラメータを設定
+   - `cd src/deploy && ./01_setup-ssm-parameters.sh <profile_name>`
+4) 依存インストール
    - `cd cdk && npm install`
    - `cd src/contract && npm install`
    - `cd src/lambda && npm install`
-3) コントラクトのビルド（必要に応じてデプロイ）
+5) コントラクトのビルド（必要に応じてデプロイ）
    - `cd src/contract && npx hardhat compile`
    - デプロイ/ロール付与は Hardhat スクリプト/Ignition を用意（今後追加）
-4) CDK
+6) CDK
    - `cd cdk && npm run build`
-   - 初回: `npx cdk bootstrap --context stage=dev`
-   - デプロイ例:
-     - `npx cdk deploy --all --context stage=dev`（開発）
-     - `npx cdk deploy --all --context stage=stg`（ステージング）
-     - `npx cdk deploy --all --context stage=prod`（本番）
+   - `npm run deploy -- --profile <profile_name>`
+
+7) SES Receipt Rule Set のアクティブ化（手動）
+   - 受信メールを有効にするには、対象リージョンでReceipt Rule Setをアクティブ化します。
+   - 備考: そのリージョンでアクティブなRule Setは常に1つです。本コマンドで切り替わります。
+
+## Lambda 構成と役割
+
+- **tx-sender（`e2emm-tx-sender-<stage>`）**
+  - **場所**: `src/lambda/tx-sender/index.js`
+  - **トリガー**: SQS `e2emm-main-queue-<stage>`（1件ずつ）
+  - **入力**: `messageBody`（JSON文字列）
+    - 形式: `{ "correlationIdHex32": "0x...64", "tagHex32": "0x...64" }`
+  - **動作**: Fireblocks経由で `E2eMonitor.ping(correlationIdHex32, tagHex32, clientTimestamp, nonce)` を送信
+  - **環境**: `SSM_PREFIX=/E2E-module/`（必要な鍵等はSSMから取得）
+  - **出力**: なし（非同期）／失敗時はDLQへ
+
+- **email-ingest（`e2emm-email-ingest-<stage>`）**
+  - **場所**: `src/lambda/email-ingest/index.js`
+  - **トリガー**: EventBridge（S3 Object Created for `e2emm-email-bucket-<stage>/ses/<stage>/`）
+  - **入力**: S3に保存された受信メール（本文からTxHash抽出）
+  - **動作**: エクスプローラAPIでTxの `E2ePing` を取得し、`correlationId` を突合。成功時にDynamoDBへ結果をupsertし、メトリクスを記録
+  - **環境**: `RESULTS_TABLE`, `CONTRACT_ADDRESS`, `EXPLORER_API_URL`, `EXPLORER_API_KEY`
+  - **出力**: DDB（`e2emm-results-<stage>`）へのレコード（キー: `correlationId`）
+
+- **prepare-message（Step Functions 内で呼び出し）**
+  - **場所**: `src/lambda/prepare-message/index.js`
+  - **トリガー**: Step Functions `e2emm-state-machine-<stage>` からの同期呼び出し
+  - **入力**: `{ correlationId: string, tagSeed?: string }`
+  - **動作**: `correlationId`/`tagSeed` を bytes32（`correlationIdHex32`/`tagHex32`）へ変換し、SQS用 `messageBody`（JSON文字列）を組み立て
+  - **出力**: `{ correlationIdHex32, tagHex32, messageBody }`
+
+### Step Functions におけるIDの扱い
+- 実行開始時に `correlationId` が未指定なら `States.UUID()` で自動生成します。
+- `prepare-message` の出力で `messageBody` を上書きし、同時にDDB検索キーとして `correlationIdHex32` を採用します。
+
 
 ## 運用・判定ロジック
 

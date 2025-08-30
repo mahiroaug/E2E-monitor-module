@@ -39,7 +39,7 @@ export class MessagingStack extends Stack {
     // Lambda: tx-sender（既存 JS を参照）
     this.txSenderFn = new NodejsFunction(this, 'TxSenderFn', {
       runtime: Runtime.NODEJS_20_X,
-      entry: join(__dirname, '../../src/lambda/recordLogHandler.js'),
+      entry: join(__dirname, '../../src/lambda/tx-sender/index.js'),
       handler: 'handler',
       functionName: `e2emm-tx-sender-${stage}`,
       memorySize: 512,

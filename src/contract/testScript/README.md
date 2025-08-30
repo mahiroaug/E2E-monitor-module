@@ -14,8 +14,8 @@
 - `.env`ファイルに以下の環境変数が設定されていること:
   - `FIREBLOCKS_API_KEY`: FireblocksのAPIキー
   - `FIREBLOCKS_SECRET_KEY_FILE`: Fireblocksの秘密鍵ファイルへのパス
-  - `FIREBLOCKS_VID_DEPLOYER`: Fireblocksのボールトアカウントのシグナーアドレス
-  - `CA_TEST_NFT_AMOY`: デプロイされたLogRecorderコントラクトのアドレス
+  - `FIREBLOCKS_VID_PINGER`: Fireblocks署名アドレス(VID)（送信用）
+  - `CA_E2E_MONITOR`: E2eMonitor Contract Address
 
 ### インストール方法
 

@@ -3,7 +3,7 @@
  *
  * 前提:
  * - プロジェクトルートに .env を配置（本スクリプトは ../../../.env を読み込み）
- * - 必須ENV: FIREBLOCKS_SECRET_KEY_FILE, FIREBLOCKS_API_KEY, FIREBLOCKS_VID_DEPLOYER, CA_E2E_MONITOR
+ * - 必須ENV: FIREBLOCKS_SECRET_KEY_FILE, FIREBLOCKS_API_KEY, FIREBLOCKS_VID_PINGER, CA_E2E_MONITOR
  * - 任意ENV: RPC_URL(既定 https://rpc-amoy.polygon.technology), CHAIN_ID(既定 80002)
  *
  * 実行例:
