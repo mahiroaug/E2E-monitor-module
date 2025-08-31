@@ -61,7 +61,7 @@ export class EmailIngestStack extends Stack {
     // EMFをCloudWatch Logsに保存するロググループ（関数デフォルトのLGを再利用）
     const logGroup = new LogGroup(this, 'EmailIngestLogGroup', {
       logGroupName: `/aws/lambda/${this.parserFn.functionName}`,
-      retention: RetentionDays.ONE_WEEK,
+      retention: RetentionDays.ONE_YEAR,
     });
 
     const s3ObjectCreatedRule = new Rule(this, 'S3ObjectCreatedRule', {
@@ -94,6 +94,22 @@ export class EmailIngestStack extends Stack {
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     });
     failureAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+
+    // Lambda Errors (backup alarm in case EMF path misses)
+    const lambdaErrorsMetric = new Metric({
+      namespace: 'AWS/Lambda',
+      metricName: 'Errors',
+      dimensionsMap: { FunctionName: this.parserFn.functionName },
+      period: Duration.minutes(5),
+      statistic: 'sum',
+    });
+    const lambdaErrorsAlarm = new Alarm(this, 'EmailIngestLambdaErrorsAlarm', {
+      metric: lambdaErrorsMetric,
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    });
+    lambdaErrorsAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
   }
 }
 

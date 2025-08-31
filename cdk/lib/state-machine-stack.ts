@@ -140,10 +140,12 @@ export class StateMachineStack extends Stack {
       .otherwise(waitRetry.next(getItemRetry).next(checkFound));
 
     const logGroup = new LogGroup(this, 'StateMachineLogs', {
-      retention: RetentionDays.ONE_WEEK,
+      retention: RetentionDays.ONE_YEAR,
     });
 
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
+    const rateFromEnv = Number(process.env.EVENT_RATE_MINUTES || '');
+    const eventRateMinutes = Number.isFinite(rateFromEnv) && rateFromEnv > 0 ? Math.floor(rateFromEnv) : 180;
     this.machine = new StateMachine(this, 'E2eMachine', {
       stateMachineName: `e2emm-state-machine-${stage}`,
       definition: new Choice(this, 'HasCorrelationId?')
@@ -160,7 +162,7 @@ export class StateMachineStack extends Stack {
         .next(waitStart)
         .next(getItemFirst)
         .next(checkFound),
-      timeout: Duration.minutes(60),
+      timeout: Duration.minutes(5),
       logs: {
         destination: logGroup,
         level: LogLevel.ALL,
@@ -183,7 +185,7 @@ export class StateMachineStack extends Stack {
 
     // EventBridge schedule (disabled by default - input requires correlationIdHex32/tagHex32)
     const rule = new Rule(this, 'E2eScheduleRule', {
-      schedule: Schedule.rate(Duration.minutes(5)),
+      schedule: Schedule.rate(Duration.minutes(eventRateMinutes)),
       enabled: false,
     });
     rule.addTarget(new SfnStateMachine(this.machine, {

@@ -33,8 +33,8 @@ const region = process.env.CDK_DEFAULT_REGION;
 const envOptional = (account && region) ? { env: { account, region } } : {};
 
 const storage = new StorageStack(app, `e2emm-stack-storage-${stage}`, { ...envOptional });
-const messaging = new MessagingStack(app, `e2emm-stack-messaging-${stage}`, { ...envOptional });
 const notification = new NotificationStack(app, `e2emm-stack-notification-${stage}`, { ...envOptional });
+const messaging = new MessagingStack(app, `e2emm-stack-messaging-${stage}`, { ...envOptional, notificationTopic: notification.topic });
 
 // SES 受信→S3 保存
 new SesReceiveStack(app, `e2emm-stack-ses-receive-${stage}`, {

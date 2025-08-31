@@ -14,13 +14,21 @@ import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
+import { RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { Alarm, ComparisonOperator, Metric, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
+import { Topic } from 'aws-cdk-lib/aws-sns';
+
+export interface MessagingStackProps extends StackProps {
+  notificationTopic?: Topic;
+}
 
 export class MessagingStack extends Stack {
   public readonly queue: Queue;
   public readonly dlq: Queue;
   public readonly txSenderFn: NodejsFunction;
 
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props?: MessagingStackProps) {
     super(scope, id, props);
 
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
@@ -44,6 +52,7 @@ export class MessagingStack extends Stack {
       functionName: `e2emm-tx-sender-${stage}`,
       memorySize: 512,
       timeout: Duration.seconds(60),
+      logRetention: RetentionDays.ONE_YEAR,
       bundling: { minify: true, externalModules: ['aws-sdk'] },
       environment: {
         SSM_PREFIX: '/E2E-module/',
@@ -59,6 +68,60 @@ export class MessagingStack extends Stack {
       actions: ['ssm:GetParameter'],
       resources: ['*'],
     }));
+
+    // --- Alarms for rapid triage ---
+    if (props?.notificationTopic) {
+      // Lambda Errors
+      const errorsMetric = new Metric({
+        namespace: 'AWS/Lambda',
+        metricName: 'Errors',
+        dimensionsMap: { FunctionName: this.txSenderFn.functionName },
+        period: Duration.minutes(5),
+        statistic: 'sum',
+      });
+      const errorsAlarm = new Alarm(this, 'TxSenderErrorsAlarm', {
+        metric: errorsMetric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+      errorsAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+
+      // Lambda Throttles（任意。スパイク検知）
+      const throttlesMetric = new Metric({
+        namespace: 'AWS/Lambda',
+        metricName: 'Throttles',
+        dimensionsMap: { FunctionName: this.txSenderFn.functionName },
+        period: Duration.minutes(5),
+        statistic: 'sum',
+      });
+      const throttlesAlarm = new Alarm(this, 'TxSenderThrottlesAlarm', {
+        metric: throttlesMetric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+      throttlesAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+
+      // DLQ visible messages >= 1
+      const dlqVisibleMetric = new Metric({
+        namespace: 'AWS/SQS',
+        metricName: 'ApproximateNumberOfMessagesVisible',
+        dimensionsMap: { QueueName: this.dlq.queueName },
+        period: Duration.minutes(5),
+        statistic: 'max',
+      });
+      const dlqAlarm = new Alarm(this, 'MainDlqMessagesVisibleAlarm', {
+        metric: dlqVisibleMetric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+      dlqAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    }
   }
 }
 

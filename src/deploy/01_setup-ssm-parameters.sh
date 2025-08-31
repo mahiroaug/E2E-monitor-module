@@ -8,7 +8,7 @@
 #
 # 使用法:
 #   ./01_setup-ssm-parameters.sh [AWS_PROFILE]
-#   例) ./01_setup-ssm-parameters.sh dev_mtools
+#   例) ./01_setup-ssm-parameters.sh aaaaaa
 #
 # 参照する .env キー（必須）:
 #   FIREBLOCKS_API_KEY         : Fireblocks API Key
