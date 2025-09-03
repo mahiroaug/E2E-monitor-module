@@ -266,7 +266,7 @@ export class StateMachineStack extends Stack {
     // EventBridge schedule (disabled by default - input requires correlationIdHex32/tagHex32)
     const rule = new Rule(this, 'E2eScheduleRule', {
       schedule: Schedule.rate(Duration.minutes(eventRateMinutes)),
-      enabled: false,
+      enabled: true,
     });
     rule.addTarget(new SfnStateMachine(this.machine, {
       // 入力不要（State Machine 内でUUID/既定tagSeedを生成）
