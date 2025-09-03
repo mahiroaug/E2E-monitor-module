@@ -25,6 +25,7 @@ EXPLORER_API_URL=https://api-amoy.polygonscan.com/api
 EXPLORER_API_KEY=                     ### エクスプローラAPIキー
 SES_RECIPIENTS=                       ### 受信メールアドレス
 EVENT_RATE_MINUTES=60                 ### 実行間隔（分）
+SF_TOTAL_ATTEMPTS=3                   ### 最大試行回数（1回5分でタイムアウト（WARNアラーム）、3回試行の場合15分でERRORアラーム）
 
 ### network設定
 RPC_URL=https://rpc-amoy.polygon.technology

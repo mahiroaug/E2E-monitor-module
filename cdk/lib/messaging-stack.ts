@@ -61,6 +61,8 @@ export class MessagingStack extends Stack {
 
     this.txSenderFn.addEventSource(new SqsEventSource(this.queue, {
       batchSize: 1,
+      // SQS Partial Batch Response を使用（成功時は削除・再試行対象のみを返す）
+      reportBatchItemFailures: true,
     }));
 
     // 最小権限: SSM 参照

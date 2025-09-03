@@ -10,7 +10,7 @@ import { Construct } from 'constructs';
 import { Queue } from 'aws-cdk-lib/aws-sqs';
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Topic } from 'aws-cdk-lib/aws-sns';
-import { StateMachine, LogLevel, JsonPath, Wait, WaitTime, LogOptions, Choice, Condition, Succeed, Pass } from 'aws-cdk-lib/aws-stepfunctions';
+import { StateMachine, LogLevel, JsonPath, Wait, WaitTime, LogOptions, Choice, Condition, Succeed, Pass, Fail } from 'aws-cdk-lib/aws-stepfunctions';
 import { CallAwsService, LambdaInvoke } from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
@@ -34,11 +34,39 @@ export class StateMachineStack extends Stack {
   constructor(scope: Construct, id: string, props: StateMachineStackProps) {
     super(scope, id, props);
 
-    // If correlationId is not provided in input, generate one (UUID)
+    // Attempts configuration
+    const totalAttemptsFromEnv = Number(process.env.SF_TOTAL_ATTEMPTS || '');
+    const totalAttempts = Number.isFinite(totalAttemptsFromEnv) && totalAttemptsFromEnv >= 1
+      ? Math.floor(totalAttemptsFromEnv)
+      : 3; // default 3 attempts (1 means no retry)
+
+    // Initialize attempts/poll counter
+    const initAttempts = new Pass(this, 'InitAttempts', {
+      parameters: {
+        attempt: 1,
+        totalAttempts,
+        pollCount: 0,
+      },
+    });
+
+    // Pass-through (used by branch when correlationId is provided)
     const useExistingCorrelationId = new Pass(this, 'UseExistingCorrelationId');
+
+    const resetPollCount = new Pass(this, 'ResetPollCount', {
+      parameters: {
+        'attempt.$': JsonPath.stringAt('$.attempt'),
+        totalAttempts,
+        pollCount: 0,
+      },
+    });
+
+    // Generate new correlationId (ignore input for each attempt)
     const generateCorrelationId = new Pass(this, 'GenerateCorrelationId', {
       parameters: {
         correlationId: JsonPath.uuid(),
+        'attempt.$': JsonPath.stringAt('$.attempt'),
+        totalAttempts,
+        pollCount: 0,
       },
     });
 
@@ -65,8 +93,12 @@ export class StateMachineStack extends Stack {
     // Ensure tagSeed exists (fallback to default when missing)
     const setDefaultTagSeed = new Pass(this, 'SetDefaultTagSeed', {
       parameters: {
-        tagSeed: 'default',
+        // Use attempt number as tag seed ("1", "2", ...)
+        'tagSeed.$': JsonPath.format('{}', JsonPath.stringAt('$.attempt')),
         correlationId: JsonPath.stringAt('$.correlationId'),
+        'attempt.$': JsonPath.stringAt('$.attempt'),
+        totalAttempts,
+        'pollCount.$': JsonPath.stringAt('$.pollCount'),
       },
     });
     const tagSeedOk = new Pass(this, 'UseExistingTagSeed');
@@ -76,6 +108,9 @@ export class StateMachineStack extends Stack {
       parameters: {
         correlationId: JsonPath.stringAt('$.prep.correlationIdHex32'),
         messageBody: JsonPath.stringAt('$.prep.messageBody'),
+        'attempt.$': JsonPath.stringAt('$.attempt'),
+        totalAttempts,
+        'pollCount.$': JsonPath.stringAt('$.pollCount'),
       },
     });
 
@@ -134,10 +169,44 @@ export class StateMachineStack extends Stack {
       resultPath: '$.ddb',
     });
 
+    // Attempt loop control (define before checkFound to avoid TDZ)
+    const failState = new Fail(this, 'AllAttemptsFailed');
+    const incAttempt = new Pass(this, 'IncrementAttempt', {
+      parameters: {
+        'attempt.$': 'States.MathAdd($.attempt, 1)',
+        totalAttempts,
+      },
+    });
+    const attemptRemain = new Choice(this, 'HasAttemptsLeft?')
+      .when(Condition.numberLessThanEquals('$.attempt', totalAttempts), generateCorrelationId)
+      .otherwise(failState);
+    const attemptFail = new Pass(this, 'AttemptFailed');
+    attemptFail.next(incAttempt).next(attemptRemain);
+
+    // Poll loop control
+    const incPoll = new Pass(this, 'IncrementPollCount', {
+      parameters: {
+        'pollCount.$': 'States.MathAdd($.pollCount, 1)',
+        'attempt.$': JsonPath.stringAt('$.attempt'),
+        totalAttempts,
+        'correlationId.$': JsonPath.stringAt('$.correlationId'),
+        'messageBody.$': JsonPath.stringAt('$.messageBody'),
+        'ddb.$': JsonPath.stringAt('$.ddb'),
+      },
+      resultPath: JsonPath.DISCARD,
+    });
+
     const checkFound = new Choice(this, 'Found?');
+    const loopAfterRetry = waitRetry.next(getItemRetry).next(checkFound);
     checkFound
       .when(Condition.isPresent('$.ddb.Item'), success)
-      .otherwise(waitRetry.next(getItemRetry).next(checkFound));
+      .otherwise(
+        incPoll.next(
+          new Choice(this, 'PollLimitReached?')
+            .when(Condition.numberGreaterThanEquals('$.pollCount', 20), attemptFail)
+            .otherwise(loopAfterRetry)
+        )
+      );
 
     const logGroup = new LogGroup(this, 'StateMachineLogs', {
       retention: RetentionDays.ONE_YEAR,
@@ -146,9 +215,10 @@ export class StateMachineStack extends Stack {
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
     const rateFromEnv = Number(process.env.EVENT_RATE_MINUTES || '');
     const eventRateMinutes = Number.isFinite(rateFromEnv) && rateFromEnv > 0 ? Math.floor(rateFromEnv) : 180;
+    const timeoutMinutes = 5 * totalAttempts + 1;
     this.machine = new StateMachine(this, 'E2eMachine', {
       stateMachineName: `e2emm-state-machine-${stage}`,
-      definition: new Choice(this, 'HasCorrelationId?')
+      definition: initAttempts.next(new Choice(this, 'HasCorrelationId?')
         .when(Condition.isPresent('$.correlationId'), useExistingCorrelationId)
         .otherwise(generateCorrelationId)
         .afterwards()
@@ -161,8 +231,8 @@ export class StateMachineStack extends Stack {
         .next(sendMessage)
         .next(waitStart)
         .next(getItemFirst)
-        .next(checkFound),
-      timeout: Duration.minutes(5),
+        .next(checkFound)),
+      timeout: Duration.minutes(timeoutMinutes),
       logs: {
         destination: logGroup,
         level: LogLevel.ALL,
@@ -172,16 +242,26 @@ export class StateMachineStack extends Stack {
     props.queue.grantSendMessages(this.machine);
     props.table.grantReadData(this.machine);
 
-    // Alarm on failed executions -> SNS
-    const failedMetric = this.machine.metricFailed();
-    const alarm = new Alarm(this, 'StateMachineFailedAlarm', {
-      metric: failedMetric,
+    // Alarms on failed executions -> SNS
+    const failed5m = this.machine.metricFailed({ period: Duration.minutes(5), statistic: 'sum' });
+    // WARN: 5分で1回失敗
+    const warnAlarm = new Alarm(this, 'StateMachineFailedWarn', {
+      metric: failed5m,
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
     });
-    alarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    warnAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    // ERROR: 15分で3回連続失敗（5分x3）
+    const errorAlarm = new Alarm(this, 'StateMachineFailedError', {
+      metric: failed5m,
+      threshold: 1,
+      evaluationPeriods: 3,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    errorAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
 
     // EventBridge schedule (disabled by default - input requires correlationIdHex32/tagHex32)
     const rule = new Rule(this, 'E2eScheduleRule', {
