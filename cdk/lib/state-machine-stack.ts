@@ -125,10 +125,10 @@ export class StateMachineStack extends Stack {
     });
 
     const waitStart = new Wait(this, 'WaitForEmail', {
-      time: WaitTime.duration(Duration.seconds(15)),
+      time: WaitTime.duration(Duration.seconds(90)),
     });
 
-    const getItemFirst = new CallAwsService(this, 'Check DDB Result', {
+    const getItemCorrFirst = new CallAwsService(this, 'Check DDB Corr', {
       service: 'dynamodb',
       action: 'getItem',
       parameters: {
@@ -141,7 +141,7 @@ export class StateMachineStack extends Stack {
         ConsistentRead: true,
       },
       iamResources: ['*'],
-      resultPath: '$.ddb',
+      resultPath: '$.ddbCorr',
     });
 
     const success = new Succeed(this, 'Success');
@@ -150,7 +150,7 @@ export class StateMachineStack extends Stack {
       time: WaitTime.duration(Duration.seconds(15)),
     });
 
-    const getItemRetry = new CallAwsService(this, 'Check DDB Result (retry)', {
+    const getItemCorrRetry = new CallAwsService(this, 'Check DDB Corr (retry)', {
       service: 'dynamodb',
       action: 'getItem',
       parameters: {
@@ -163,7 +163,40 @@ export class StateMachineStack extends Stack {
         ConsistentRead: true,
       },
       iamResources: ['*'],
-      resultPath: '$.ddb',
+      resultPath: '$.ddbCorr',
+    });
+
+    // Balance heartbeat key lookup (correlationId = 'HB#BALANCE')
+    const getItemBalFirst = new CallAwsService(this, 'Check DDB Balance', {
+      service: 'dynamodb',
+      action: 'getItem',
+      parameters: {
+        TableName: props.table.tableName,
+        Key: {
+          correlationId: {
+            S: 'HB#BALANCE',
+          },
+        },
+        ConsistentRead: true,
+      },
+      iamResources: ['*'],
+      resultPath: '$.ddbBal',
+    });
+
+    const getItemBalRetry = new CallAwsService(this, 'Check DDB Balance (retry)', {
+      service: 'dynamodb',
+      action: 'getItem',
+      parameters: {
+        TableName: props.table.tableName,
+        Key: {
+          correlationId: {
+            S: 'HB#BALANCE',
+          },
+        },
+        ConsistentRead: true,
+      },
+      iamResources: ['*'],
+      resultPath: '$.ddbBal',
     });
 
     // Attempt loop control (define before checkFound to avoid TDZ)
@@ -188,22 +221,52 @@ export class StateMachineStack extends Stack {
         totalAttempts,
         'correlationId.$': JsonPath.stringAt('$.correlationId'),
         'messageBody.$': JsonPath.stringAt('$.messageBody'),
-        'ddb.$': JsonPath.stringAt('$.ddb'),
       },
       resultPath: JsonPath.DISCARD,
     });
 
     const checkFound = new Choice(this, 'Found?');
-    const loopAfterRetry = waitRetry.next(getItemRetry).next(checkFound);
-    checkFound
-      .when(Condition.isPresent('$.ddb.Item'), success)
-      .otherwise(
-        incPoll.next(
-          new Choice(this, 'PollLimitReached?')
-            .when(Condition.numberGreaterThanEquals('$.pollCount', 20), attemptFail)
-            .otherwise(loopAfterRetry)
-        )
-      );
+    const successMode = (process.env.SF_SUCCESS_MODE || 'and').toLowerCase();
+    const corrPresent = Condition.isPresent('$.ddbCorr.Item');
+    const balPresent = Condition.isPresent('$.ddbBal.Item');
+
+    const loopAfterRetry = waitRetry
+      .next(getItemCorrRetry)
+      .next(getItemBalRetry)
+      .next(checkFound);
+
+    if (successMode === 'correlation') {
+      checkFound
+        .when(corrPresent, success)
+        .otherwise(
+          incPoll.next(
+            new Choice(this, 'PollLimitReached?')
+              .when(Condition.numberGreaterThanEquals('$.pollCount', 14), attemptFail)
+              .otherwise(loopAfterRetry)
+          )
+        );
+    } else if (successMode === 'balance') {
+      checkFound
+        .when(balPresent, success)
+        .otherwise(
+          incPoll.next(
+            new Choice(this, 'PollLimitReached?')
+              .when(Condition.numberGreaterThanEquals('$.pollCount', 14), attemptFail)
+              .otherwise(loopAfterRetry)
+          )
+        );
+    } else {
+      // default 'and' mode
+      checkFound
+        .when(Condition.and(corrPresent, balPresent), success)
+        .otherwise(
+          incPoll.next(
+            new Choice(this, 'PollLimitReached?')
+              .when(Condition.numberGreaterThanEquals('$.pollCount', 14), attemptFail)
+              .otherwise(loopAfterRetry)
+          )
+        );
+    }
 
     const logGroup = new LogGroup(this, 'StateMachineLogs', {
       retention: RetentionDays.ONE_YEAR,
@@ -222,7 +285,8 @@ export class StateMachineStack extends Stack {
         .next(adoptPreparedValues)
         .next(sendMessage)
         .next(waitStart)
-        .next(getItemFirst)
+        .next(getItemCorrFirst)
+        .next(getItemBalFirst)
         .next(checkFound),
       timeout: Duration.minutes(timeoutMinutes),
       logs: {

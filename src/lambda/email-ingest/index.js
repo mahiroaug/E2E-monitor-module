@@ -123,6 +123,13 @@ function extractTxHashFromText(text) {
   return null;
 }
 
+function classifyEmail(text, rawEmail) {
+  const txHash = extractTxHashFromText(text);
+  if (txHash) return { type: 'event', txHash };
+  if (isBalanceMail(text, rawEmail)) return { type: 'balance' };
+  return { type: 'other' };
+}
+
 async function fetchReceiptFromExplorer(txHash) {
   const url = new URL(EXPLORER_API_URL);
   // Polygonscan 互換の proxy API
@@ -213,6 +220,74 @@ async function putResultItem(correlationId, txHash) {
   await ddb.send(new PutCommand({ TableName: RESULTS_TABLE, Item: item }));
 }
 
+// バランス通知のハートビートを記録
+async function putBalanceHeartbeat() {
+  const now = new Date().toISOString();
+  const item = {
+    correlationId: 'HB#BALANCE',
+    type: 'BALANCE_HEARTBEAT',
+    lastSeen: now,
+  };
+  await ddb.send(new PutCommand({ TableName: RESULTS_TABLE, Item: item }));
+}
+
+function decodeRfc2047(str) {
+  return String(str || '')
+    .replace(/=\?utf-8\?b\?([^?]+)\?=/gi, (_, b64) => {
+      try { return Buffer.from(b64, 'base64').toString('utf8'); } catch { return _; }
+    })
+    .replace(/=\?utf-8\?q\?([^?]+)\?=/gi, (_, q) => {
+      try {
+        const replaced = q.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+        return replaced;
+      } catch {
+        return _;
+      }
+    });
+}
+
+function extractSubject(rawEmail) {
+  const raw = String(rawEmail || '');
+  const headerEndIdx = raw.indexOf('\n\n');
+  const headers = headerEndIdx >= 0 ? raw.slice(0, headerEndIdx) : raw;
+  const lines = headers.split(/\r?\n/);
+  let subject = '';
+  let capturing = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!capturing) {
+      const m = /^Subject:\s*(.*)$/i.exec(line);
+      if (m) {
+        subject = m[1];
+        capturing = true;
+      }
+    } else {
+      if (/^[\t\s]/.test(line)) subject += ' ' + line.trim();
+      else break;
+    }
+  }
+  return decodeRfc2047(subject).trim();
+}
+
+function isBalanceMail(text, rawEmail) {
+  // 件名優先
+  const subj = extractSubject(rawEmail).toLowerCase();
+  if (subj) {
+    if (subj.includes('wallet') && subj.includes('balance')) return true;
+    if (subj.includes('ウォレット残高')) return true;
+    if (/ウォレット\s*.*\s*残高/.test(subj) || /残高\s*.*\s*ウォレット/.test(subj) || subj.includes('残高通知')) return true;
+  }
+  // 本文
+  const decoded = decodeRfc2047(String(text || ''));
+  const lower = decoded.toLowerCase();
+  const normalized = lower.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  if (normalized.includes('wallet') && normalized.includes('balance')) return true;
+  if (normalized.includes('ウォレット残高')) return true;
+  const jpPatterns = [/ウォレット\s*.*\s*残高/, /残高\s*.*\s*ウォレット/, /残高通知/];
+  for (const re of jpPatterns) if (re.test(normalized)) return true;
+  return false;
+}
+
 function extractS3Events(evt) {
   const out = [];
   // S3 Event Notification (Records[])
@@ -254,13 +329,28 @@ exports.handler = async (event, context) => {
 
       // quoted-printable 部分のデコード（雑だがメール全体に適用）
       const text = decodeQuotedPrintable(raw);
-      const txHash = extractTxHashFromText(text);
-      if (!txHash) {
-        logger.warn('TxHash not found in email', { bucket, key });
-        // 軽微な未検出（同一Txで複数メールのうちTxIDなしのもの）は SoftMiss として計上
-        emitMetric('SoftMiss', 'TxHashNotFound');
+
+      // 種類判別 → 種類別処理
+      const classification = classifyEmail(text, raw);
+      logger.info('Email classified', { type: classification.type });
+
+      if (classification.type === 'balance') {
+        logger.info('Balance notification email detected, recording heartbeat');
+        try {
+          await putBalanceHeartbeat();
+          logger.info('Balance heartbeat recorded');
+        } catch (e) {
+          logger.warn('Balance heartbeat write failed', { error: e && e.message ? e.message : String(e) });
+        }
+        continue; // balance はここで完了
+      }
+
+      if (classification.type === 'other') {
+        logger.info('Other mail type detected, skipping');
         continue;
       }
+
+      const txHash = classification.txHash;
       logger.info('TxHash extracted', { txHash });
 
       let receipt;
