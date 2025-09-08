@@ -55,6 +55,8 @@ export class EmailIngestStack extends Stack {
         CONTRACT_ADDRESS: process.env.CA_E2E_MONITOR || '',
         EXPLORER_API_URL: process.env.EXPLORER_API_URL || 'https://api-amoy.polygonscan.com/api',
         EXPLORER_API_KEY: process.env.EXPLORER_API_KEY || '',
+        RPC_ALCHEMY_URL: process.env.RPC_ALCHEMY_URL || '',
+        RPC_ALCHEMY_APIKEY: process.env.RPC_ALCHEMY_APIKEY || '',
       },
     });
 

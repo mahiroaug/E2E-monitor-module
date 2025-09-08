@@ -13,6 +13,8 @@
 const RESULTS_TABLE = process.env.RESULTS_TABLE || '';
 const EXPLORER_API_URL = process.env.EXPLORER_API_URL || '';
 const EXPLORER_API_KEY = process.env.EXPLORER_API_KEY || '';
+const RPC_ALCHEMY_URL = process.env.RPC_ALCHEMY_URL || '';
+const RPC_ALCHEMY_APIKEY = process.env.RPC_ALCHEMY_APIKEY || '';
 const CONTRACT_ADDRESS = (process.env.CONTRACT_ADDRESS || '').toLowerCase();
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 
@@ -102,12 +104,22 @@ function extractTxHashFromText(text) {
     const m = url[0].match(/0x[a-fA-F0-9]{64}/);
     if (m) return m[0];
   }
-  // 2) ラベル付き "TxID: 0x..."（テキスト本文）
-  const labeled = text.match(/TxID\s*:\s*(0x[a-fA-F0-9]{64})/i);
-  if (labeled) return labeled[1];
-  // 3) 直接 0x64桁（最後の手段。EventIDなどの誤拾いの可能性）
-  const direct = text.match(/0x[a-fA-F0-9]{64}/);
-  if (direct) return direct[0];
+  // 2) ラベル付き（多言語対応）
+  const labelPatterns = [
+    /TxID\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /Tx\s*Id\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /TxHash\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /Tx\s*Hash\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /Transaction\s*Hash\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /トランザクションID\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /トランザクションハッシュ\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+    /取引ID\s*[:：]\s*(0x[a-fA-F0-9]{64})/i,
+  ];
+  for (const re of labelPatterns) {
+    const m = text.match(re);
+    if (m) return m[1];
+  }
+  // 裸の64桁ハッシュは誤検知（EventID等）が多いため採用しない
   return null;
 }
 
@@ -129,7 +141,52 @@ async function fetchReceiptFromExplorer(txHash) {
   if (!res.ok) throw new Error(`Explorer API error: ${res.status}`);
   const body = await res.json();
   if (!body || !body.result) throw new Error('Invalid explorer response');
+  logger.info('Explorer (Polygonscan-compatible) receipt fetch success', { txhash: txHash });
   return body.result;
+}
+
+// Alchemy JSON-RPC 経由
+async function fetchReceiptViaAlchemy(txHash) {
+  if (!RPC_ALCHEMY_URL) throw new Error('Alchemy URL not configured');
+  const body = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getTransactionReceipt',
+    params: [txHash],
+  };
+  // エンドポイント解決: すでに /v2/<key> を含むならそのまま。/v2 で終わるなら /<key> を付与。
+  // それ以外は末尾に /v2/<key> を付与（APIKEYが無ければURLそのまま）。
+  let endpoint = RPC_ALCHEMY_URL.trim();
+  if (endpoint.includes('/v2/')) {
+    // 完全URL（キー含む）
+  } else if (endpoint.endsWith('/v2') && RPC_ALCHEMY_APIKEY) {
+    endpoint = `${endpoint}/${RPC_ALCHEMY_APIKEY}`;
+  } else if (RPC_ALCHEMY_APIKEY) {
+    endpoint = endpoint.replace(/\/+$/, '') + `/v2/${RPC_ALCHEMY_APIKEY}`;
+  }
+  logger.debug('Alchemy RPC request', { endpoint, method: body.method, txhash: txHash });
+  const res = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`Alchemy RPC error: ${res.status}`);
+  const json = await res.json();
+  if (!json || !json.result) throw new Error('Invalid alchemy response');
+  logger.info('Alchemy RPC receipt fetch success', { txhash: txHash });
+  return json.result;
+}
+
+async function fetchReceipt(txHash) {
+  if (RPC_ALCHEMY_URL) {
+    try {
+      logger.info('Receipt fetch route selected', { route: 'alchemy' });
+      return await fetchReceiptViaAlchemy(txHash);
+    } catch (e) {
+      logger.warn('Alchemy RPC failed, fallback to explorer', {
+        error: e && e.message ? e.message : String(e),
+        fallbackRoute: 'alchemy->explorer',
+      });
+    }
+  }
+  logger.info('Receipt fetch route selected', { route: 'explorer' });
+  return await fetchReceiptFromExplorer(txHash);
 }
 
 
@@ -208,7 +265,7 @@ exports.handler = async (event, context) => {
 
       let receipt;
       try {
-        receipt = await fetchReceiptFromExplorer(txHash);
+        receipt = await fetchReceipt(txHash);
       } catch (e) {
         logger.warn('Explorer API error', { error: e && e.message ? e.message : String(e), txHash });
         emitMetric('Failures', 'ExplorerError');

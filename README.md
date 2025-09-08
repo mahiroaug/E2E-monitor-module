@@ -18,6 +18,7 @@ FIREBLOCKS_SECRET_KEY_FILE=
 FIREBLOCKS_VID_DEPLOYER=              ### Fireblocks Vault Account ID (deployer)
 POLYGONSCAN_API_KEY=                  ### スマートコントラクト検証用APIキー
 
+
 ### E2E監視用
 FIREBLOCKS_VID_PINGER=                ### Fireblocks Vault Account ID (tx sender)
 CA_E2E_MONITOR=                       ### コントラクトアドレス
@@ -27,13 +28,25 @@ SES_RECIPIENTS=                       ### 受信メールアドレス
 EVENT_RATE_MINUTES=60                 ### 実行間隔（分）
 SF_TOTAL_ATTEMPTS=3                   ### 最大試行回数（1回5分でタイムアウト（WARNアラーム）、3回試行の場合15分でERRORアラーム）
 
+
 ### network設定
 RPC_URL=https://rpc-amoy.polygon.technology
 CHAIN_ID=80002
 
+
+### alchemy設定
+RPC_ALCHEMY_URL=https://polygon-amoy.g.alchemy.com/v2
+RPC_ALCHEMY_APIKEY=
+
+
+### explorer設定
+EXPLORER_API_URL=https://api-amoy.polygonscan.com/api # for polygonscan
+EXPLORER_API_KEY=
+
 ### ロギング設定
 LOG_LEVEL=debug
 ```
+
 
 ## デプロイ手順
 1. devcontainerを起動
