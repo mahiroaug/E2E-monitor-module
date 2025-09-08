@@ -90,10 +90,26 @@ export class EmailIngestStack extends Stack {
     const failureAlarm = new Alarm(this, 'EmailIngestFailuresAlarm', {
       metric: failuresMetric,
       threshold: 1,
-      evaluationPeriods: 1,
+      evaluationPeriods: 2, // 連続2期間（10分）でHard Failを発報
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     });
     failureAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+
+    // SoftMiss はTxID非含有やCorrelationId未検出など軽微な未達を集約
+    const softMissMetric = new Metric({
+      namespace: 'E2E/EmailIngest',
+      metricName: 'SoftMiss',
+      statistic: 'sum',
+      period: Duration.minutes(5),
+      dimensionsMap: { FunctionName: this.parserFn.functionName },
+    });
+    const softMissAlarm = new Alarm(this, 'EmailIngestSoftMissAlarm', {
+      metric: softMissMetric,
+      threshold: 3, // 5分で3件以上（=多重メール中の多数未検出）
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    });
+    softMissAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
 
     // Lambda Errors (backup alarm in case EMF path misses)
     const lambdaErrorsMetric = new Metric({

@@ -53,8 +53,8 @@ function streamToString(stream) {
   });
 }
 
-// CloudWatch Embedded Metric Format (EMF) で失敗メトリクスを出力
-function emitFailureMetric(reason) {
+// CloudWatch Embedded Metric Format (EMF)
+function emitMetric(metricName, reason) {
   try {
     const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME || 'email-ingest';
     const metricPayload = {
@@ -64,18 +64,18 @@ function emitFailureMetric(reason) {
           {
             Namespace: 'E2E/EmailIngest',
             Dimensions: [['FunctionName']],
-            Metrics: [{ Name: 'Failures', Unit: 'Count' }],
+            Metrics: [{ Name: metricName, Unit: 'Count' }],
           },
           {
             Namespace: 'E2E/EmailIngest',
             Dimensions: [['FunctionName', 'Reason']],
-            Metrics: [{ Name: 'Failures', Unit: 'Count' }],
+            Metrics: [{ Name: metricName, Unit: 'Count' }],
           },
         ],
       },
       FunctionName: functionName,
       Reason: reason,
-      Failures: 1,
+      [metricName]: 1,
     };
     console.log(JSON.stringify(metricPayload));
   } catch (e) {
@@ -200,7 +200,8 @@ exports.handler = async (event, context) => {
       const txHash = extractTxHashFromText(text);
       if (!txHash) {
         logger.warn('TxHash not found in email', { bucket, key });
-        emitFailureMetric('TxHashNotFound');
+        // 軽微な未検出（同一Txで複数メールのうちTxIDなしのもの）は SoftMiss として計上
+        emitMetric('SoftMiss', 'TxHashNotFound');
         continue;
       }
       logger.info('TxHash extracted', { txHash });
@@ -210,7 +211,7 @@ exports.handler = async (event, context) => {
         receipt = await fetchReceiptFromExplorer(txHash);
       } catch (e) {
         logger.warn('Explorer API error', { error: e && e.message ? e.message : String(e), txHash });
-        emitFailureMetric('ExplorerError');
+        emitMetric('Failures', 'ExplorerError');
         continue;
       }
       logger.debug('Explorer receipt fetched');
@@ -218,7 +219,7 @@ exports.handler = async (event, context) => {
       const correlationId = extractCorrelationIdFromLogs(receipt);
       if (!correlationId) {
         logger.warn('CorrelationId not found in logs', { txHash });
-        emitFailureMetric('CorrelationIdNotFound');
+        emitMetric('SoftMiss', 'CorrelationIdNotFound');
         continue;
       }
       logger.info('CorrelationId extracted', { correlationId });
@@ -229,12 +230,12 @@ exports.handler = async (event, context) => {
         logger.info('DynamoDB write success');
       } catch (e) {
         logger.error('DynamoDB PutItem failed', { error: e && e.message ? e.message : String(e) });
-        emitFailureMetric('DdbError');
+        emitMetric('Failures', 'DdbError');
         continue;
       }
     } catch (e) {
       logger.error('Unexpected processing error', { error: e && e.message ? e.message : String(e) });
-      emitFailureMetric('UnexpectedError');
+      emitMetric('Failures', 'UnexpectedError');
       // 1レコード失敗でも他は処理継続
     }
   }

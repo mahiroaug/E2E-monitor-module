@@ -49,12 +49,10 @@ export class StateMachineStack extends Stack {
       },
     });
 
-    // Pass-through (used by branch when correlationId is provided)
-    const useExistingCorrelationId = new Pass(this, 'UseExistingCorrelationId');
 
     const resetPollCount = new Pass(this, 'ResetPollCount', {
       parameters: {
-        'attempt.$': JsonPath.stringAt('$.attempt'),
+        attempt: JsonPath.stringAt('$.attempt'),
         totalAttempts,
         pollCount: 0,
       },
@@ -64,7 +62,7 @@ export class StateMachineStack extends Stack {
     const generateCorrelationId = new Pass(this, 'GenerateCorrelationId', {
       parameters: {
         correlationId: JsonPath.uuid(),
-        'attempt.$': JsonPath.stringAt('$.attempt'),
+        attempt: JsonPath.stringAt('$.attempt'),
         totalAttempts,
         pollCount: 0,
       },
@@ -94,23 +92,22 @@ export class StateMachineStack extends Stack {
     const setDefaultTagSeed = new Pass(this, 'SetDefaultTagSeed', {
       parameters: {
         // Use attempt number as tag seed ("1", "2", ...)
-        'tagSeed.$': JsonPath.format('{}', JsonPath.stringAt('$.attempt')),
+        tagSeed: JsonPath.stringAt('$.attempt'),
         correlationId: JsonPath.stringAt('$.correlationId'),
-        'attempt.$': JsonPath.stringAt('$.attempt'),
+        attempt: JsonPath.stringAt('$.attempt'),
         totalAttempts,
-        'pollCount.$': JsonPath.stringAt('$.pollCount'),
+        pollCount: JsonPath.stringAt('$.pollCount'),
       },
     });
-    const tagSeedOk = new Pass(this, 'UseExistingTagSeed');
 
     // Adopt hex32 into root correlationId and messageBody from prep
     const adoptPreparedValues = new Pass(this, 'AdoptPreparedValues', {
       parameters: {
         correlationId: JsonPath.stringAt('$.prep.correlationIdHex32'),
         messageBody: JsonPath.stringAt('$.prep.messageBody'),
-        'attempt.$': JsonPath.stringAt('$.attempt'),
+        attempt: JsonPath.stringAt('$.attempt'),
         totalAttempts,
-        'pollCount.$': JsonPath.stringAt('$.pollCount'),
+        pollCount: JsonPath.stringAt('$.pollCount'),
       },
     });
 
@@ -218,20 +215,15 @@ export class StateMachineStack extends Stack {
     const timeoutMinutes = 5 * totalAttempts + 1;
     this.machine = new StateMachine(this, 'E2eMachine', {
       stateMachineName: `e2emm-state-machine-${stage}`,
-      definition: initAttempts.next(new Choice(this, 'HasCorrelationId?')
-        .when(Condition.isPresent('$.correlationId'), useExistingCorrelationId)
-        .otherwise(generateCorrelationId)
-        .afterwards()
-        .next(new Choice(this, 'HasTagSeed?')
-          .when(Condition.isPresent('$.tagSeed'), tagSeedOk)
-          .otherwise(setDefaultTagSeed)
-          .afterwards())
+      definition: initAttempts
+        .next(generateCorrelationId)
+        .next(setDefaultTagSeed)
         .next(prepareMessage)
         .next(adoptPreparedValues)
         .next(sendMessage)
         .next(waitStart)
         .next(getItemFirst)
-        .next(checkFound)),
+        .next(checkFound),
       timeout: Duration.minutes(timeoutMinutes),
       logs: {
         destination: logGroup,
