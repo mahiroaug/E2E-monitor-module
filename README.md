@@ -80,13 +80,50 @@ LOG_LEVEL=debug
 - 手動トリガ
   - Step Functions入力は空で可（空オブジェクト）。
 
-## 監視/アラーム
-すべて`e2emm-alerts-<stage>`へ通知。
-- Step Functions Failed ≥ 1
-- Email Ingest Failures（EMF）≥ 1
-- Email Ingest Lambda Errors ≥ 1（バックアップ）
-- tx-sender Lambda Errors ≥ 1 / Throttles ≥ 1
-- SQS DLQ Visible ≥ 1
+## 監視/アラーム（設計）
+全アラートは `e2emm-alerts-<stage>` に通知されます（OK通知も有効）。
+
+- Step Functions（`E2E/StateMachine`）
+  - AttemptFailed（WARN）
+    - 生成: 各Attemptが約5分で失敗すると1カウント
+    - アラーム: 数式メトリクス（AF-S, 5分）
+      - AF = AttemptFailed sum(5m), S = Success sum(5m)
+      - 条件: AF − S > 0（次のAttempt成功で相殺→自動復旧）
+    - 補助: `AttemptFailedInfo`（Attempt/TotalAttempts/PollCount）
+  - FinalFailed（ERROR）
+    - 生成: 全Attempt失敗で1カウント
+    - アラーム: 数式メトリクス（FF-S, 復旧窓）
+      - 復旧窓: `max(EVENT_RATE_MINUTES, 60)` 分
+      - 条件: FF − S > 0（次のStateMachine成功で自動復旧）
+    - 補助: `FinalFailedInfo`（Attempt/TotalAttempts/PollCount）
+  - Success（自動復旧用）
+    - 生成: ステートマシン成功直前に1カウント
+    - 目的: 上記AF-S / FF-Sの相殺用
+  - 重要度表現
+    - `AttemptFailedWarn` → description/タグ: severity=warning
+    - `StateMachineFailedError` → description/タグ: severity=critical
+
+- Email Ingest（カスタム名前空間: `E2E/EmailIngest`）
+  - Failures（Hard Fail）
+    - メトリクス: `Failures`（5分, sum）
+    - アラーム: 連続2期間（10分）で閾値≥1
+  - SoftMiss（TxID/Correlation未検出の軽微な未達）
+    - メトリクス: `SoftMiss`（5分, sum）
+    - アラーム: 5分で≥3
+  - バックアップ
+    - `AWS/Lambda Errors` ≥1（5分, sum）
+
+- その他
+  - tx-sender: `AWS/Lambda Errors` ≥1、`Throttles` ≥1
+  - SQS: DLQ `ApproximateNumberOfMessagesVisible` ≥1
+
+補足:
+- Step Functionsの成功条件（デフォルト: AND）
+  - correlationResolved == true AND balanceReceived == true（DDB単一レコード判定）
+- リトライ/タイムアウト
+  - 初回待機 90秒 → 15秒ポーリング×最大14回 ≒ 1試行 ≒ 約5分
+  - 総タイムアウト: `5 * SF_TOTAL_ATTEMPTS + 1` 分
+  - AttemptFailed（WARN）は試行失敗ごと、FinalFailed（ERROR）は全試行失敗時に発火
 
 ## ログ
 - 保持期間: 1年（Step Functions / email-ingest / tx-sender）

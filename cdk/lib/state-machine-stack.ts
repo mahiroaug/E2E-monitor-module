@@ -13,7 +13,8 @@ import { Topic } from 'aws-cdk-lib/aws-sns';
 import { StateMachine, LogLevel, JsonPath, Wait, WaitTime, LogOptions, Choice, Condition, Succeed, Pass, Fail } from 'aws-cdk-lib/aws-stepfunctions';
 import { CallAwsService, LambdaInvoke } from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { Alarm, ComparisonOperator, TreatMissingData, Metric } from 'aws-cdk-lib/aws-cloudwatch';
+import { Alarm, ComparisonOperator, TreatMissingData, Metric, MathExpression } from 'aws-cdk-lib/aws-cloudwatch';
+import { Tags } from 'aws-cdk-lib';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Rule, Schedule, RuleTargetInput } from 'aws-cdk-lib/aws-events';
 import { SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
@@ -178,7 +179,9 @@ export class StateMachineStack extends Stack {
       .when(Condition.numberLessThanEquals('$.attempt', totalAttempts), generateCorrelationId);
     const attemptFail = new Pass(this, 'AttemptFailed');
 
-    // AttemptFailed ごとにカスタムメトリクスを送信
+    // Attempt-level failure metric
+    // Purpose: Trigger a WARN alarm per 5-minute poll cycle failure
+    // (dimensions metric AttemptFailedInfo helps triage: attempt/totalAttempts/pollCount)
     const emitAttemptFailedMetric = new CallAwsService(this, 'EmitAttemptFailedMetric', {
       service: 'cloudwatch',
       action: 'putMetricData',
@@ -211,7 +214,9 @@ export class StateMachineStack extends Stack {
       .next(incAttempt)
       .next(attemptRemain);
 
-    // Final failure metric and fail state
+    // Final failure metric then Fail state
+    // Purpose: Trigger an ERROR alarm when all attempts are consumed.
+    // It will auto-clear on the next successful execution.
     const emitFinalFailedMetric = new CallAwsService(this, 'EmitFinalFailedMetric', {
       service: 'cloudwatch',
       action: 'putMetricData',
@@ -242,6 +247,7 @@ export class StateMachineStack extends Stack {
     attemptRemain.otherwise(emitFinalFailedMetric.next(finalFail));
 
     // Poll loop control
+    // Keep pollCount and context in state (do not discard result)
     const incPoll = new Pass(this, 'IncrementPollCount', {
       parameters: {
         'pollCount.$': 'States.MathAdd($.pollCount, 1)',
@@ -254,6 +260,8 @@ export class StateMachineStack extends Stack {
 
     const checkFound = new Choice(this, 'Found?');
     const successMode = (process.env.SF_SUCCESS_MODE || 'and').toLowerCase();
+    // NOTE: DDB boolean attributes appear as 'Bool' in Step Functions output.
+    // Combine presence + equality checks to avoid invalid path when Item is missing.
     const corrResolved = Condition.and(
       Condition.isPresent('$.ddbCorr.Item.correlationResolved.Bool'),
       Condition.booleanEquals('$.ddbCorr.Item.correlationResolved.Bool', true),
@@ -267,9 +275,24 @@ export class StateMachineStack extends Stack {
       .next(getItemCorrRetry)
       .next(checkFound);
 
+    // Emit Success metric right before completing the execution
+    // Purpose: Enable auto-clear of WARN/ERROR using math expressions over time windows
+    const emitSuccessMetric = new CallAwsService(this, 'EmitSuccessMetric', {
+      service: 'cloudwatch',
+      action: 'putMetricData',
+      parameters: {
+        Namespace: 'E2E/StateMachine',
+        MetricData: [
+          { MetricName: 'Success', Unit: 'Count', Value: 1 },
+        ],
+      },
+      iamResources: ['*'],
+      resultPath: JsonPath.DISCARD,
+    });
+
     if (successMode === 'correlation') {
       checkFound
-        .when(corrResolved, success)
+        .when(corrResolved, emitSuccessMetric.next(success))
         .otherwise(
           incPoll.next(
             new Choice(this, 'PollLimitReached?')
@@ -279,7 +302,7 @@ export class StateMachineStack extends Stack {
         );
     } else if (successMode === 'balance') {
       checkFound
-        .when(balanceReceived, success)
+        .when(balanceReceived, emitSuccessMetric.next(success))
         .otherwise(
           incPoll.next(
             new Choice(this, 'PollLimitReached?')
@@ -290,7 +313,7 @@ export class StateMachineStack extends Stack {
     } else {
       // default 'and' mode
       checkFound
-        .when(Condition.and(corrResolved, balanceReceived), success)
+        .when(Condition.and(corrResolved, balanceReceived), emitSuccessMetric.next(success))
         .otherwise(
           incPoll.next(
             new Choice(this, 'PollLimitReached?')
@@ -329,37 +352,72 @@ export class StateMachineStack extends Stack {
     props.queue.grantSendMessages(this.machine);
     props.table.grantReadData(this.machine);
 
-    // Alarms: AttemptFailed (WARN), Final failed executions (ERROR)
+    // Alarms: AttemptFailed (WARN), FinalFailed (ERROR) 
     const attemptFailedMetric = new Metric({
       namespace: 'E2E/StateMachine',
       metricName: 'AttemptFailed',
       period: Duration.minutes(5),
       statistic: 'sum',
     });
+    const success5m = new Metric({
+      namespace: 'E2E/StateMachine',
+      metricName: 'Success',
+      period: Duration.minutes(5),
+      statistic: 'sum',
+    });
+    const warnExpr = new MathExpression({
+      expression: 'af - s',
+      usingMetrics: { af: attemptFailedMetric, s: success5m },
+      period: Duration.minutes(5),
+    });
     const warnAttemptAlarm = new Alarm(this, 'AttemptFailedWarn', {
-      metric: attemptFailedMetric,
-      threshold: 1,
+      metric: warnExpr,
+      threshold: 0,
       evaluationPeriods: 1,
-      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'severity=warning: Attempt failed (auto-OK on next success within 5 minutes).',
     });
     warnAttemptAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    warnAttemptAlarm.addOkAction(new SnsAction(props.notificationTopic));
+    Tags.of(warnAttemptAlarm).add('severity', 'warning');
 
-    // ERROR: FinalFailed >=1 in 1 minutes
     const finalFailedMetric = new Metric({
       namespace: 'E2E/StateMachine',
       metricName: 'FinalFailed',
-      period: Duration.minutes(1),
+      period: Duration.minutes(5),
       statistic: 'sum',
     });
+    // 復旧を「次の成功」で確実にするため、ウィンドウはスケジュール間隔を考慮
+    const recoveryWindowMinutes = Math.max(eventRateMinutes, 60);
+    const successWindow = new Metric({
+      namespace: 'E2E/StateMachine',
+      metricName: 'Success',
+      period: Duration.minutes(recoveryWindowMinutes),
+      statistic: 'sum',
+    });
+    const finalFailedWindow = new Metric({
+      namespace: 'E2E/StateMachine',
+      metricName: 'FinalFailed',
+      period: Duration.minutes(recoveryWindowMinutes),
+      statistic: 'sum',
+    });
+    const errorExpr = new MathExpression({
+      expression: 'ff - s',
+      usingMetrics: { ff: finalFailedWindow, s: successWindow },
+      period: Duration.minutes(recoveryWindowMinutes),
+    });
     const errorAlarm = new Alarm(this, 'StateMachineFailedError', {
-      metric: finalFailedMetric,
-      threshold: 1,
+      metric: errorExpr,
+      threshold: 0,
       evaluationPeriods: 1,
-      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'severity=critical: Final failure (auto-OK on next success within window).',
     });
     errorAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    errorAlarm.addOkAction(new SnsAction(props.notificationTopic));
+    Tags.of(errorAlarm).add('severity', 'critical');
 
     // EventBridge schedule (disabled by default - input requires correlationIdHex32/tagHex32)
     const rule = new Rule(this, 'E2eScheduleRule', {
