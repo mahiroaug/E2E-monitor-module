@@ -9,7 +9,7 @@
 import { Stack, StackProps, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
-import { AttributeType, BillingMode, Table } from 'aws-cdk-lib/aws-dynamodb';
+import { AttributeType, BillingMode, Table, ProjectionType } from 'aws-cdk-lib/aws-dynamodb';
 
 export class StorageStack extends Stack {
   public readonly bucket: Bucket;
@@ -31,6 +31,14 @@ export class StorageStack extends Stack {
       partitionKey: { name: 'correlationId', type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // GSI for time-window correlation (query by eventBucket + eventEmailAtMs)
+    this.table.addGlobalSecondaryIndex({
+      indexName: 'GSI1_EventTime',
+      partitionKey: { name: 'eventBucket', type: AttributeType.STRING },
+      sortKey: { name: 'eventEmailAtMs', type: AttributeType.NUMBER },
+      projectionType: ProjectionType.ALL,
     });
   }
 }

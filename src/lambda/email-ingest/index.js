@@ -20,7 +20,7 @@ const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 
 const s3 = new S3Client({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -210,25 +210,90 @@ function extractCorrelationIdFromLogs(receipt) {
   return null;
 }
 
-async function putResultItem(correlationId, txHash) {
+function makeEventBucket(epochMs) {
+  const d = new Date(epochMs);
+  // yyyyMMddHHmm（1分バケット）
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
+}
+
+async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
   const item = {
     correlationId,
-    status: 'SUCCESS',
     txHash,
-    receivedAt: new Date().toISOString(),
+    correlationResolved: true,
+    eventEmailAt: new Date(eventEmailAtMs).toISOString(),
+    eventEmailAtMs,
+    eventBucket: makeEventBucket(eventEmailAtMs),
+    balanceReceived: false,
   };
   await ddb.send(new PutCommand({ TableName: RESULTS_TABLE, Item: item }));
 }
 
-// バランス通知のハートビートを記録
-async function putBalanceHeartbeat() {
-  const now = new Date().toISOString();
-  const item = {
-    correlationId: 'HB#BALANCE',
-    type: 'BALANCE_HEARTBEAT',
-    lastSeen: now,
-  };
-  await ddb.send(new PutCommand({ TableName: RESULTS_TABLE, Item: item }));
+// バランス通知: 時間相関で最も近いイベント実行レコードに紐付け
+async function attachBalanceByTimeWindow() {
+  const nowMs = Date.now();
+  const earliestMs = nowMs - 3 * 60 * 1000; // 3分前
+  const latestMs = nowMs - 20 * 1000; // 20秒前
+  const buckets = [];
+  // 分境界を跨ぐので earliest 分から latest 分まで列挙
+  const startMinute = Math.floor(earliestMs / 60000);
+  const endMinute = Math.floor(latestMs / 60000);
+  for (let m = startMinute; m <= endMinute; m++) buckets.push(makeEventBucket(m * 60000));
+
+  let candidates = [];
+  for (const bucket of buckets) {
+    try {
+      const out = await ddb.send(new QueryCommand({
+        TableName: RESULTS_TABLE,
+        IndexName: 'GSI1_EventTime',
+        KeyConditionExpression: 'eventBucket = :b AND eventEmailAtMs BETWEEN :s AND :e',
+        ExpressionAttributeValues: {
+          ':b': bucket,
+          ':s': earliestMs,
+          ':e': latestMs,
+        },
+        ScanIndexForward: false, // 新しい順
+        Limit: 10,
+      }));
+      const items = out.Items || [];
+      candidates.push(...items);
+    } catch (e) {
+      logger.warn('GSI query failed', { bucket, error: e && e.message ? e.message : String(e) });
+    }
+  }
+
+  // フィルタ: まだ balanceReceived でない、かつ最も近い過去
+  candidates = candidates
+    .filter((i) => i && i.correlationId && i.eventEmailAtMs <= latestMs && i.correlationResolved)
+    .sort((a, b) => b.eventEmailAtMs - a.eventEmailAtMs);
+
+  const nowIso = new Date(nowMs).toISOString();
+  for (const cand of candidates) {
+    try {
+      const res = await ddb.send(new UpdateCommand({
+        TableName: RESULTS_TABLE,
+        Key: { correlationId: cand.correlationId },
+        UpdateExpression: 'SET balanceReceived = :true, balanceEmailAt = :iso, balanceEmailAtMs = :ms',
+        ConditionExpression: 'attribute_not_exists(balanceEmailAtMs) OR balanceReceived = :false',
+        ExpressionAttributeValues: {
+          ':true': true,
+          ':false': false,
+          ':iso': nowIso,
+          ':ms': nowMs,
+        },
+      }));
+      logger.info('Balance attached to correlation record', { correlationId: cand.correlationId });
+      return true;
+    } catch (e) {
+      // 条件に合わない/競合などは次候補へ
+      logger.debug('Balance attach candidate skipped', { correlationId: cand.correlationId, reason: e && e.message ? e.message : String(e) });
+    }
+  }
+
+  // 候補がない場合は情報ログのみ（必要なら暫定ハートビート）
+  logger.info('No eligible event record found for balance window; skipping attach');
+  return false;
 }
 
 function decodeRfc2047(str) {
@@ -335,12 +400,12 @@ exports.handler = async (event, context) => {
       logger.info('Email classified', { type: classification.type });
 
       if (classification.type === 'balance') {
-        logger.info('Balance notification email detected, recording heartbeat');
+        logger.info('Balance notification email detected, trying time-window attach');
         try {
-          await putBalanceHeartbeat();
-          logger.info('Balance heartbeat recorded');
+          await attachBalanceByTimeWindow();
+          logger.info('Balance processed');
         } catch (e) {
-          logger.warn('Balance heartbeat write failed', { error: e && e.message ? e.message : String(e) });
+          logger.warn('Balance processing failed', { error: e && e.message ? e.message : String(e) });
         }
         continue; // balance はここで完了
       }
@@ -372,8 +437,9 @@ exports.handler = async (event, context) => {
       logger.info('CorrelationId extracted', { correlationId });
 
       try {
-        logger.info('Putting item to DynamoDB', { table: RESULTS_TABLE });
-        await putResultItem(correlationId, txHash);
+        const nowMs = Date.now();
+        logger.info('Upserting event record to DynamoDB', { table: RESULTS_TABLE });
+        await upsertEventRecord(correlationId, txHash, nowMs);
         logger.info('DynamoDB write success');
       } catch (e) {
         logger.error('DynamoDB PutItem failed', { error: e && e.message ? e.message : String(e) });

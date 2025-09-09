@@ -78,6 +78,8 @@ export class EmailIngestStack extends Stack {
     s3ObjectCreatedRule.addTarget(new LambdaTarget(this.parserFn));
 
     props.bucket.grantRead(this.parserFn);
+    // Query を実行するため Read 権限（GSI 含む）を付与
+    props.table.grantReadData(this.parserFn);
     props.table.grantWriteData(this.parserFn);
     props.notificationTopic.grantPublish(this.parserFn);
 

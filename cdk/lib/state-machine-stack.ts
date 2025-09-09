@@ -13,7 +13,7 @@ import { Topic } from 'aws-cdk-lib/aws-sns';
 import { StateMachine, LogLevel, JsonPath, Wait, WaitTime, LogOptions, Choice, Condition, Succeed, Pass, Fail } from 'aws-cdk-lib/aws-stepfunctions';
 import { CallAwsService, LambdaInvoke } from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { Alarm, ComparisonOperator, TreatMissingData, Metric } from 'aws-cdk-lib/aws-cloudwatch';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Rule, Schedule, RuleTargetInput } from 'aws-cdk-lib/aws-events';
 import { SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
@@ -128,7 +128,7 @@ export class StateMachineStack extends Stack {
       time: WaitTime.duration(Duration.seconds(90)),
     });
 
-    const getItemCorrFirst = new CallAwsService(this, 'Check DDB Corr', {
+    const getItemCorrFirst = new CallAwsService(this, 'Check DDB Item', {
       service: 'dynamodb',
       action: 'getItem',
       parameters: {
@@ -150,7 +150,7 @@ export class StateMachineStack extends Stack {
       time: WaitTime.duration(Duration.seconds(15)),
     });
 
-    const getItemCorrRetry = new CallAwsService(this, 'Check DDB Corr (retry)', {
+    const getItemCorrRetry = new CallAwsService(this, 'Check DDB Item (retry)', {
       service: 'dynamodb',
       action: 'getItem',
       parameters: {
@@ -166,41 +166,8 @@ export class StateMachineStack extends Stack {
       resultPath: '$.ddbCorr',
     });
 
-    // Balance heartbeat key lookup (correlationId = 'HB#BALANCE')
-    const getItemBalFirst = new CallAwsService(this, 'Check DDB Balance', {
-      service: 'dynamodb',
-      action: 'getItem',
-      parameters: {
-        TableName: props.table.tableName,
-        Key: {
-          correlationId: {
-            S: 'HB#BALANCE',
-          },
-        },
-        ConsistentRead: true,
-      },
-      iamResources: ['*'],
-      resultPath: '$.ddbBal',
-    });
-
-    const getItemBalRetry = new CallAwsService(this, 'Check DDB Balance (retry)', {
-      service: 'dynamodb',
-      action: 'getItem',
-      parameters: {
-        TableName: props.table.tableName,
-        Key: {
-          correlationId: {
-            S: 'HB#BALANCE',
-          },
-        },
-        ConsistentRead: true,
-      },
-      iamResources: ['*'],
-      resultPath: '$.ddbBal',
-    });
 
     // Attempt loop control (define before checkFound to avoid TDZ)
-    const failState = new Fail(this, 'AllAttemptsFailed');
     const incAttempt = new Pass(this, 'IncrementAttempt', {
       parameters: {
         'attempt.$': 'States.MathAdd($.attempt, 1)',
@@ -208,36 +175,101 @@ export class StateMachineStack extends Stack {
       },
     });
     const attemptRemain = new Choice(this, 'HasAttemptsLeft?')
-      .when(Condition.numberLessThanEquals('$.attempt', totalAttempts), generateCorrelationId)
-      .otherwise(failState);
+      .when(Condition.numberLessThanEquals('$.attempt', totalAttempts), generateCorrelationId);
     const attemptFail = new Pass(this, 'AttemptFailed');
-    attemptFail.next(incAttempt).next(attemptRemain);
+
+    // AttemptFailed ごとにカスタムメトリクスを送信
+    const emitAttemptFailedMetric = new CallAwsService(this, 'EmitAttemptFailedMetric', {
+      service: 'cloudwatch',
+      action: 'putMetricData',
+      parameters: {
+        Namespace: 'E2E/StateMachine',
+        MetricData: [
+          {
+            MetricName: 'AttemptFailed',
+            Unit: 'Count',
+            Value: 1,
+          },
+          {
+            MetricName: 'AttemptFailedInfo',
+            Unit: 'Count',
+            Value: 1,
+            Dimensions: [
+              { Name: 'Attempt', Value: JsonPath.format('{}', JsonPath.stringAt('$.attempt')) },
+              { Name: 'TotalAttempts', Value: JsonPath.format('{}', JsonPath.stringAt('$.totalAttempts')) },
+              { Name: 'PollCount', Value: JsonPath.format('{}', JsonPath.stringAt('$.pollCount')) },
+            ],
+          },
+        ],
+      },
+      iamResources: ['*'],
+      resultPath: JsonPath.DISCARD,
+    });
+
+    attemptFail
+      .next(emitAttemptFailedMetric)
+      .next(incAttempt)
+      .next(attemptRemain);
+
+    // Final failure metric and fail state
+    const emitFinalFailedMetric = new CallAwsService(this, 'EmitFinalFailedMetric', {
+      service: 'cloudwatch',
+      action: 'putMetricData',
+      parameters: {
+        Namespace: 'E2E/StateMachine',
+        MetricData: [
+          {
+            MetricName: 'FinalFailed',
+            Unit: 'Count',
+            Value: 1,
+          },
+          {
+            MetricName: 'FinalFailedInfo',
+            Unit: 'Count',
+            Value: 1,
+            Dimensions: [
+              { Name: 'Attempt', Value: JsonPath.format('{}', JsonPath.stringAt('$.attempt')) },
+              { Name: 'TotalAttempts', Value: JsonPath.format('{}', JsonPath.stringAt('$.totalAttempts')) },
+              { Name: 'PollCount', Value: JsonPath.format('{}', JsonPath.stringAt('$.pollCount')) },
+            ],
+          },
+        ],
+      },
+      iamResources: ['*'],
+      resultPath: JsonPath.DISCARD,
+    });
+    const finalFail = new Fail(this, 'AllAttemptsFailed');
+    attemptRemain.otherwise(emitFinalFailedMetric.next(finalFail));
 
     // Poll loop control
     const incPoll = new Pass(this, 'IncrementPollCount', {
       parameters: {
         'pollCount.$': 'States.MathAdd($.pollCount, 1)',
-        'attempt.$': JsonPath.stringAt('$.attempt'),
+        attempt: JsonPath.stringAt('$.attempt'),
         totalAttempts,
-        'correlationId.$': JsonPath.stringAt('$.correlationId'),
-        'messageBody.$': JsonPath.stringAt('$.messageBody'),
+        correlationId: JsonPath.stringAt('$.correlationId'),
+        messageBody: JsonPath.stringAt('$.messageBody'),
       },
-      resultPath: JsonPath.DISCARD,
     });
 
     const checkFound = new Choice(this, 'Found?');
     const successMode = (process.env.SF_SUCCESS_MODE || 'and').toLowerCase();
-    const corrPresent = Condition.isPresent('$.ddbCorr.Item');
-    const balPresent = Condition.isPresent('$.ddbBal.Item');
+    const corrResolved = Condition.and(
+      Condition.isPresent('$.ddbCorr.Item.correlationResolved.Bool'),
+      Condition.booleanEquals('$.ddbCorr.Item.correlationResolved.Bool', true),
+    );
+    const balanceReceived = Condition.and(
+      Condition.isPresent('$.ddbCorr.Item.balanceReceived.Bool'),
+      Condition.booleanEquals('$.ddbCorr.Item.balanceReceived.Bool', true),
+    );
 
     const loopAfterRetry = waitRetry
       .next(getItemCorrRetry)
-      .next(getItemBalRetry)
       .next(checkFound);
 
     if (successMode === 'correlation') {
       checkFound
-        .when(corrPresent, success)
+        .when(corrResolved, success)
         .otherwise(
           incPoll.next(
             new Choice(this, 'PollLimitReached?')
@@ -247,7 +279,7 @@ export class StateMachineStack extends Stack {
         );
     } else if (successMode === 'balance') {
       checkFound
-        .when(balPresent, success)
+        .when(balanceReceived, success)
         .otherwise(
           incPoll.next(
             new Choice(this, 'PollLimitReached?')
@@ -258,7 +290,7 @@ export class StateMachineStack extends Stack {
     } else {
       // default 'and' mode
       checkFound
-        .when(Condition.and(corrPresent, balPresent), success)
+        .when(Condition.and(corrResolved, balanceReceived), success)
         .otherwise(
           incPoll.next(
             new Choice(this, 'PollLimitReached?')
@@ -286,7 +318,6 @@ export class StateMachineStack extends Stack {
         .next(sendMessage)
         .next(waitStart)
         .next(getItemCorrFirst)
-        .next(getItemBalFirst)
         .next(checkFound),
       timeout: Duration.minutes(timeoutMinutes),
       logs: {
@@ -298,22 +329,33 @@ export class StateMachineStack extends Stack {
     props.queue.grantSendMessages(this.machine);
     props.table.grantReadData(this.machine);
 
-    // Alarms on failed executions -> SNS
-    const failed5m = this.machine.metricFailed({ period: Duration.minutes(5), statistic: 'sum' });
-    // WARN: 5分で1回失敗
-    const warnAlarm = new Alarm(this, 'StateMachineFailedWarn', {
-      metric: failed5m,
+    // Alarms: AttemptFailed (WARN), Final failed executions (ERROR)
+    const attemptFailedMetric = new Metric({
+      namespace: 'E2E/StateMachine',
+      metricName: 'AttemptFailed',
+      period: Duration.minutes(5),
+      statistic: 'sum',
+    });
+    const warnAttemptAlarm = new Alarm(this, 'AttemptFailedWarn', {
+      metric: attemptFailedMetric,
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
     });
-    warnAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
-    // ERROR: 15分で3回連続失敗（5分x3）
+    warnAttemptAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+
+    // ERROR: FinalFailed >=1 in 1 minutes
+    const finalFailedMetric = new Metric({
+      namespace: 'E2E/StateMachine',
+      metricName: 'FinalFailed',
+      period: Duration.minutes(1),
+      statistic: 'sum',
+    });
     const errorAlarm = new Alarm(this, 'StateMachineFailedError', {
-      metric: failed5m,
+      metric: finalFailedMetric,
       threshold: 1,
-      evaluationPeriods: 3,
+      evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
     });
