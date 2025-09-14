@@ -30,17 +30,21 @@ SF_TOTAL_ATTEMPTS=3                   ### 最大試行回数（1回5分でタイ
 
 
 ### network設定
-RPC_URL=https://rpc-amoy.polygon.technology
-CHAIN_ID=80002
+RPC_URL=https://polygon-rpc.com # fot Hardhat network setting | scripts | mainnet
+CHAIN_ID=137 # fot Hardhat network setting | scripts | mainnet
+RPC_URL=https://rpc-amoy.polygon.technology # fot Hardhat network setting | scripts | amoy
+CHAIN_ID=80002 # fot Hardhat network setting | scripts | amoy
 
 
 ### alchemy設定
-RPC_ALCHEMY_URL=https://polygon-amoy.g.alchemy.com/v2
+RPC_ALCHEMY_URL=https://polygon-mainnet.g.alchemy.com/v2 # mainnet
+RPC_ALCHEMY_URL=https://polygon-amoy.g.alchemy.com/v2 # amoy
 RPC_ALCHEMY_APIKEY=
 
 
 ### explorer設定
-EXPLORER_API_URL=https://api-amoy.polygonscan.com/api # for polygonscan
+EXPLORER_API_URL=https://api.polygonscan.com/api # for polygonscan mainnet
+EXPLORER_API_URL=https://api-amoy.polygonscan.com/api # for polygonscan amoy
 EXPLORER_API_KEY=
 
 ### ロギング設定

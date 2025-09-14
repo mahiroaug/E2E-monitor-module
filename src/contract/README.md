@@ -54,64 +54,27 @@ npx hardhat ignition deploy ignition/modules/E2eMonitor.ts --network localhost
 
 ```bash
 # Ignitionを使用したデプロイ
-npx hardhat ignition deploy ignition/modules/E2eMonitor.ts --network amoy
+npx hardhat ignition deploy ignition/modules/E2eMonitor.ts --network amoy # amoy
+npx hardhat ignition deploy ignition/modules/E2eMonitor.ts --network polygon # mainnet
 ```
 
 6. **コード検証**
 
 ```bash
-npx hardhat verify --network amoy [contract_address]
+npx hardhat verify --network amoy [contract_address] [deployer_address] # amoy
+npx hardhat verify --network polygon [contract_address] [deployer_address] # mainnet
 ```
 
-
-## コントラクト使用方法
-
-### ログデータの記録
-
-```javascript
-// コントラクトのインスタンスを取得
-const logRecorder = await LogRecorder.deployed();
-
-// ログデータの記録（オーナーアカウントからのみ実行可能）
-await logRecorder.recordLog(
-  logSetId,      // ログ集約ID (uint256)
-  timeSlot,      // タイムスロット情報 (uint256)
-  userList,      // ユーザーリスト (uint256[])
-  hashValue      // ハッシュ値 (bytes32)
-);
-```
-
-サンプルスクリプト
+7. **ロールの付与**
 
 ```bash
-cd testScript
-npm install
-npm run record
+node testScript/grantRole.js SENDER_ROLE [target_address] # amoy
+node testScript/grantRole.js SENDER_ROLE [target_address] # mainnet
 ```
 
-### ログデータの取得
+8. **イベントの送信**
 
-```javascript
-// 特定のログを取得
-const logData = await logRecorder.getLog(logSetId);
-// logData[0]: ログ集約ID
-// logData[1]: タイムスロット情報
-// logData[2]: ユーザーリスト
-// logData[3]: ハッシュ値
-// logData[4]: タイムスタンプ
-```
-
-## イベント監視
-
-```javascript
-// LogRecordedイベントの監視
-logRecorder.events.LogRecorded({}, (error, event) => {
-  if (!error) {
-    console.log("ログが記録されました:");
-    console.log("ログ集約ID:", event.returnValues.logSetId);
-    console.log("タイムスロット:", event.returnValues.timeSlot);
-    console.log("ユーザーリスト:", event.returnValues.userList);
-    console.log("ハッシュ値:", event.returnValues.hashValue);
-  }
-});
+```bash
+node testScript/e2eping.js # amoy
+node testScript/e2eping.js # mainnet
 ```

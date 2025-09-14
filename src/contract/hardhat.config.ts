@@ -37,9 +37,18 @@ const config: HardhatUserConfig = {
         vaultAccountIds: process.env.FIREBLOCKS_VID_DEPLOYER || "",
       },
     },
+    polygon: {
+      url: "https://polygon-rpc.com",
+      fireblocks: {
+        apiKey: process.env.FIREBLOCKS_API_KEY || "",
+        privateKey: fb_apiSecret,
+        vaultAccountIds: process.env.FIREBLOCKS_VID_DEPLOYER || "",
+      },
+    },
   },
   etherscan: {
     apiKey: {
+      polygon: process.env.POLYGONSCAN_API_KEY || "",
       amoy: process.env.POLYGONSCAN_API_KEY || "",
     },
     customChains: [
