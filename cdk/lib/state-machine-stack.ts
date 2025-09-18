@@ -173,6 +173,8 @@ export class StateMachineStack extends Stack {
       parameters: {
         'attempt.$': 'States.MathAdd($.attempt, 1)',
         totalAttempts,
+        // preserve pollCount for EmitFinalFailedMetric dimensions
+        'pollCount.$': '$.pollCount',
       },
     });
     const attemptRemain = new Choice(this, 'HasAttemptsLeft?')

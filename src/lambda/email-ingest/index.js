@@ -234,7 +234,7 @@ async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
 async function attachBalanceByTimeWindow() {
   const nowMs = Date.now();
   const earliestMs = nowMs - 3 * 60 * 1000; // 3分前
-  const latestMs = nowMs - 20 * 1000; // 20秒前
+  const latestMs = nowMs; // 直前(0秒)
   const buckets = [];
   // 分境界を跨ぐので earliest 分から latest 分まで列挙
   const startMinute = Math.floor(earliestMs / 60000);
