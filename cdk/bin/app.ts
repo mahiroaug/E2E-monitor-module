@@ -22,9 +22,13 @@ import { SesReceiveStack } from '../lib/ses-receive-stack';
  * - dotenv を先に読み込んだ上で App を初期化します。
  */
 
-// Load environment variables from both project root and cdk/.env (cdk overrides root)
+// Load environment variables from root/.env, cdk/.env and stage-specific .env files
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
 dotenv.config({ path: resolve(process.cwd(), '.env') });
+const stageFromCtx = process.env.STAGE || 'dev';
+// load stage-specific env from project root and cdk dir if exists
+dotenv.config({ path: resolve(process.cwd(), `../.env_${stageFromCtx}`) });
+dotenv.config({ path: resolve(process.cwd(), `.env_${stageFromCtx}`) });
 
 const app = new App();
 const stage = app.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';

@@ -56,6 +56,8 @@ export class MessagingStack extends Stack {
       bundling: { minify: true, externalModules: ['aws-sdk'] },
       environment: {
         SSM_PREFIX: '/E2E-module/',
+        RPC_URL: process.env.RPC_URL || '',
+        CHAIN_ID: process.env.CHAIN_ID || '',
       },
     });
 
