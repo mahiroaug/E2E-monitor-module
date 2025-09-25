@@ -7,7 +7,7 @@
  * - env EXPLORER_API_URL      : エクスプローラAPI URL（既定 Polygonscan互換）
  * - env EXPLORER_API_KEY      : エクスプローラAPI Key（任意）
  */
-import { Duration, Stack, StackProps } from 'aws-cdk-lib';
+import { Duration, Stack, StackProps, Tags } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Topic } from 'aws-cdk-lib/aws-sns';
@@ -96,8 +96,11 @@ export class EmailIngestStack extends Stack {
       threshold: 1,
       evaluationPeriods: 2, // 連続2期間（10分）でHard Failを発報
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmName: `${this.parserFn.functionName}--ERROR--failures`,
+      alarmDescription: 'severity=ERROR: EmailIngest Failures >= 1 for 2 periods (5m each).',
     });
     failureAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    Tags.of(failureAlarm).add('severity', 'ERROR');
 
     // SoftMiss はTxID非含有やCorrelationId未検出など軽微な未達を集約
     const softMissMetric = new Metric({
@@ -112,8 +115,11 @@ export class EmailIngestStack extends Stack {
       threshold: 3, // 5分で3件以上（=多重メール中の多数未検出）
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmName: `${this.parserFn.functionName}--INFO--softmiss`,
+      alarmDescription: 'severity=INFO: EmailIngest SoftMiss >= 3 (5m sum).',
     });
     softMissAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    Tags.of(softMissAlarm).add('severity', 'INFO');
 
     // Lambda Errors (backup alarm in case EMF path misses)
     const lambdaErrorsMetric = new Metric({
@@ -128,8 +134,11 @@ export class EmailIngestStack extends Stack {
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmName: `${this.parserFn.functionName}--WARN--failed`,
+      alarmDescription: 'severity=WARN: Lambda Errors >= 1 (5m sum).',
     });
     lambdaErrorsAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    Tags.of(lambdaErrorsAlarm).add('severity', 'WARN');
   }
 }
 

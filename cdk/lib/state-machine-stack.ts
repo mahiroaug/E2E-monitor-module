@@ -35,11 +35,19 @@ export class StateMachineStack extends Stack {
   constructor(scope: Construct, id: string, props: StateMachineStackProps) {
     super(scope, id, props);
 
-    // Attempts configuration
+    // Stage and schedule configuration (defined early for use in metrics dimensions)
+    const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
+    const rateFromEnv = Number(process.env.EVENT_RATE_MINUTES || '');
+    const eventRateMinutes = Number.isFinite(rateFromEnv) && rateFromEnv > 0 ? Math.floor(rateFromEnv) : 180;
     const totalAttemptsFromEnv = Number(process.env.SF_TOTAL_ATTEMPTS || '');
-    const totalAttempts = Number.isFinite(totalAttemptsFromEnv) && totalAttemptsFromEnv >= 1
+    const totalAttemptsDefault = Number.isFinite(totalAttemptsFromEnv) && totalAttemptsFromEnv >= 1
       ? Math.floor(totalAttemptsFromEnv)
-      : 3; // default 3 attempts (1 means no retry)
+      : 3;
+    const defaultTimeoutMinutes = 5 * totalAttemptsDefault + 1;
+    const machineName = `e2emm-state-machine-${stage}`;
+
+    // Attempts configuration
+    const totalAttempts = totalAttemptsDefault; // default 3 attempts (1 means no retry)
 
     // Initialize attempts/poll counter
     const initAttempts = new Pass(this, 'InitAttempts', {
@@ -229,12 +237,18 @@ export class StateMachineStack extends Stack {
             MetricName: 'FinalFailed',
             Unit: 'Count',
             Value: 1,
+            Dimensions: [
+              { Name: 'Stage', Value: stage },
+              { Name: 'StateMachineName', Value: machineName },
+            ],
           },
           {
             MetricName: 'FinalFailedInfo',
             Unit: 'Count',
             Value: 1,
             Dimensions: [
+              { Name: 'Stage', Value: stage },
+              { Name: 'StateMachineName', Value: machineName },
               { Name: 'Attempt', Value: JsonPath.format('{}', JsonPath.stringAt('$.attempt')) },
               { Name: 'TotalAttempts', Value: JsonPath.format('{}', JsonPath.stringAt('$.totalAttempts')) },
               { Name: 'PollCount', Value: JsonPath.format('{}', JsonPath.stringAt('$.pollCount')) },
@@ -285,7 +299,15 @@ export class StateMachineStack extends Stack {
       parameters: {
         Namespace: 'E2E/StateMachine',
         MetricData: [
-          { MetricName: 'Success', Unit: 'Count', Value: 1 },
+          {
+            MetricName: 'Success',
+            Unit: 'Count',
+            Value: 1,
+            Dimensions: [
+              { Name: 'Stage', Value: stage },
+              { Name: 'StateMachineName', Value: machineName },
+            ],
+          },
         ],
       },
       iamResources: ['*'],
@@ -328,14 +350,35 @@ export class StateMachineStack extends Stack {
     const logGroup = new LogGroup(this, 'StateMachineLogs', {
       retention: RetentionDays.ONE_YEAR,
     });
-
-    const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
-    const rateFromEnv = Number(process.env.EVENT_RATE_MINUTES || '');
-    const eventRateMinutes = Number.isFinite(rateFromEnv) && rateFromEnv > 0 ? Math.floor(rateFromEnv) : 180;
+    // timeoutMinutes is already computed above using totalAttemptsDefault
+    // keep using totalAttempts for state machine timeout logic
     const timeoutMinutes = 5 * totalAttempts + 1;
+
+    // Heartbeat: ステートマシン起動時に 1 を送信
+    const emitHeartbeatMetric = new CallAwsService(this, 'EmitHeartbeatMetric', {
+      service: 'cloudwatch',
+      action: 'putMetricData',
+      parameters: {
+        Namespace: 'E2E/Heartbeat',
+        MetricData: [
+          {
+            MetricName: 'heartbeat',
+            Unit: 'Count',
+            Value: 1,
+            Dimensions: [
+              { Name: 'Stage', Value: stage },
+              { Name: 'Component', Value: 'statemachine' },
+            ],
+          },
+        ],
+      },
+      iamResources: ['*'],
+      resultPath: JsonPath.DISCARD,
+    });
     this.machine = new StateMachine(this, 'E2eMachine', {
-      stateMachineName: `e2emm-state-machine-${stage}`,
+      stateMachineName: machineName,
       definition: initAttempts
+        .next(emitHeartbeatMetric)
         .next(generateCorrelationId)
         .next(setDefaultTagSeed)
         .next(prepareMessage)
@@ -354,35 +397,37 @@ export class StateMachineStack extends Stack {
     props.queue.grantSendMessages(this.machine);
     props.table.grantReadData(this.machine);
 
-    // Alarms: AttemptFailed (WARN), FinalFailed (ERROR) 
-    const attemptFailedMetric = new Metric({
+    // Alarms: AttemptFailed (WARN), FinalFailed (ERROR)
+    // WARNは「成功するまで維持」するため、評価ウィンドウを再試行間隔(5分)＋バタ付き防止(1分)の6分で設定
+    const attemptFailedWindow = new Metric({
       namespace: 'E2E/StateMachine',
       metricName: 'AttemptFailed',
-      period: Duration.minutes(5),
+      period: Duration.minutes(6),
       statistic: 'sum',
     });
-    const success5m = new Metric({
+    const successWindowWarn = new Metric({
       namespace: 'E2E/StateMachine',
       metricName: 'Success',
-      period: Duration.minutes(5),
+      period: Duration.minutes(6),
       statistic: 'sum',
     });
-    const warnExpr = new MathExpression({
+    const warnExprWindow = new MathExpression({
       expression: 'af - s',
-      usingMetrics: { af: attemptFailedMetric, s: success5m },
-      period: Duration.minutes(5),
+      usingMetrics: { af: attemptFailedWindow, s: successWindowWarn },
+      period: Duration.minutes(6),
     });
     const warnAttemptAlarm = new Alarm(this, 'AttemptFailedWarn', {
-      metric: warnExpr,
+      metric: warnExprWindow,
       threshold: 0,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'severity=warning: Attempt failed (auto-OK on next success within 5 minutes).',
+      alarmName: `${this.machine.stateMachineName}--WARN--attempt-failed`,
+      alarmDescription: 'severity=WARN: Attempt failed (auto-OK on next success within 6 minutes).',
     });
     warnAttemptAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
     warnAttemptAlarm.addOkAction(new SnsAction(props.notificationTopic));
-    Tags.of(warnAttemptAlarm).add('severity', 'warning');
+    Tags.of(warnAttemptAlarm).add('severity', 'WARN');
 
     const finalFailedMetric = new Metric({
       namespace: 'E2E/StateMachine',
@@ -390,19 +435,20 @@ export class StateMachineStack extends Stack {
       period: Duration.minutes(5),
       statistic: 'sum',
     });
-    // 復旧を「次の成功」で確実にするため、ウィンドウはスケジュール間隔を考慮
-    const recoveryWindowMinutes = Math.max(eventRateMinutes, 60);
+    const recoveryWindowMinutes = eventRateMinutes + 3;
     const successWindow = new Metric({
       namespace: 'E2E/StateMachine',
       metricName: 'Success',
       period: Duration.minutes(recoveryWindowMinutes),
       statistic: 'sum',
+      dimensionsMap: { Stage: stage, StateMachineName: machineName },
     });
     const finalFailedWindow = new Metric({
       namespace: 'E2E/StateMachine',
       metricName: 'FinalFailed',
       period: Duration.minutes(recoveryWindowMinutes),
       statistic: 'sum',
+      dimensionsMap: { Stage: stage, StateMachineName: machineName },
     });
     const errorExpr = new MathExpression({
       expression: 'ff - s',
@@ -415,11 +461,54 @@ export class StateMachineStack extends Stack {
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'severity=critical: Final failure (auto-OK on next success within window).',
+      alarmName: `${this.machine.stateMachineName}--ERROR--final-failed`,
+      alarmDescription: 'severity=ERROR: Final failure (auto-OK on next success within window).',
     });
     errorAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
     errorAlarm.addOkAction(new SnsAction(props.notificationTopic));
-    Tags.of(errorAlarm).add('severity', 'critical');
+    Tags.of(errorAlarm).add('severity', 'ERROR');
+
+    // Heartbeat missed アラーム（ウォッチドッグ）
+    // 1分粒度で EVENT_RATE_MINUTES+3 連続で欠損/0 なら ALARM（= どこか1分でも 1 が出れば即OK）
+    const heartbeatMetric = new Metric({
+      namespace: 'E2E/Heartbeat',
+      metricName: 'heartbeat',
+      period: Duration.minutes(1),
+      statistic: 'sum',
+      dimensionsMap: { Stage: stage, Component: 'statemachine' },
+    });
+    const heartbeatMissedAlarm = new Alarm(this, 'StateMachineHeartbeatMissed', {
+      metric: heartbeatMetric,
+      threshold: 1,
+      evaluationPeriods: eventRateMinutes + 3,
+      datapointsToAlarm: eventRateMinutes + 3,
+      comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.BREACHING,
+      alarmName: `${this.machine.stateMachineName}--ERROR--heartbeat-missed`,
+      alarmDescription: 'severity=ERROR: No heartbeat for EVENT_RATE_MINUTES+3 minutes.',
+    });
+    heartbeatMissedAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    heartbeatMissedAlarm.addOkAction(new SnsAction(props.notificationTopic));
+    Tags.of(heartbeatMissedAlarm).add('severity', 'ERROR');
+
+    // AttemptFailed パルスアラーム（1分ごとにAttemptFailedが発生したら単発通知）
+    const attemptFailedPulse = new Metric({
+      namespace: 'E2E/StateMachine',
+      metricName: 'AttemptFailed',
+      period: Duration.minutes(1),
+      statistic: 'sum',
+    });
+    const attemptFailedPulseAlarm = new Alarm(this, 'AttemptFailedPulseWarn', {
+      metric: attemptFailedPulse,
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+      alarmName: `${this.machine.stateMachineName}--WARN--attempt-failed-pulse`,
+      alarmDescription: 'severity=WARN: AttemptFailed >= 1 (1m sum). Single-shot pulse per minute.',
+    });
+    attemptFailedPulseAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+    Tags.of(attemptFailedPulseAlarm).add('severity', 'WARN');
 
     // EventBridge schedule (disabled by default - input requires correlationIdHex32/tagHex32)
     const rule = new Rule(this, 'E2eScheduleRule', {

@@ -5,7 +5,7 @@
  * - context 'stage'（dev|stg|prod）: SQS/Lambda 名称サフィックス
  * - env SSM_PREFIX: Lambda 環境変数で参照（既定 /E2E-module/）
  */
-import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration, RemovalPolicy, Tags } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Queue, DeadLetterQueue } from 'aws-cdk-lib/aws-sqs';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -89,8 +89,11 @@ export class MessagingStack extends Stack {
         evaluationPeriods: 1,
         comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: TreatMissingData.NOT_BREACHING,
+        alarmName: `${this.txSenderFn.functionName}--WARN--failed`,
+        alarmDescription: 'severity=WARN: Lambda Errors >= 1 (5m sum).',
       });
       errorsAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+      Tags.of(errorsAlarm).add('severity', 'WARN');
 
       // Lambda Throttles（任意。スパイク検知）
       const throttlesMetric = new Metric({
@@ -106,8 +109,11 @@ export class MessagingStack extends Stack {
         evaluationPeriods: 1,
         comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: TreatMissingData.NOT_BREACHING,
+        alarmName: `${this.txSenderFn.functionName}--WARN--throttled`,
+        alarmDescription: 'severity=WARN: Lambda Throttles >= 1 (5m sum).',
       });
       throttlesAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+      Tags.of(throttlesAlarm).add('severity', 'WARN');
 
       // DLQ visible messages >= 1
       const dlqVisibleMetric = new Metric({
