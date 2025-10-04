@@ -40,8 +40,8 @@ export class MessagingStack extends Stack {
 
     this.queue = new Queue(this, 'MainQueue', {
       queueName: `e2emm-main-queue-${stage}`,
-      visibilityTimeout: Duration.seconds(120),
-      deadLetterQueue: { maxReceiveCount: 5, queue: this.dlq } as DeadLetterQueue,
+      visibilityTimeout: Duration.seconds(210),
+      deadLetterQueue: { maxReceiveCount: 1, queue: this.dlq } as DeadLetterQueue,
     });
 
     // Lambda: tx-sender（既存 JS を参照）
@@ -51,7 +51,7 @@ export class MessagingStack extends Stack {
       handler: 'handler',
       functionName: `e2emm-tx-sender-${stage}`,
       memorySize: 512,
-      timeout: Duration.seconds(60),
+      timeout: Duration.seconds(180),
       logRetention: RetentionDays.ONE_YEAR,
       bundling: { minify: true, externalModules: ['aws-sdk'] },
       environment: {
@@ -129,8 +129,11 @@ export class MessagingStack extends Stack {
         evaluationPeriods: 1,
         comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: TreatMissingData.NOT_BREACHING,
+        alarmName: `${this.dlq.queueName}--WARN--dlq-messages-visible`,
+        alarmDescription: 'severity=WARN: SQS DLQ ApproximateNumberOfMessagesVisible >= 1 (5m max).',
       });
       dlqAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
+      Tags.of(dlqAlarm).add('severity', 'WARN');
     }
   }
 }
