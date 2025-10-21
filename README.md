@@ -76,10 +76,35 @@ LOG_LEVEL=debug
 ## 運用
 - 正常フロー
   1) Step FunctionsがUUIDで`correlationId`生成
-  2) `prepare-message`が`correlationIdHex32/tagHex32`を組成→SQSへ
-  3) `tx-sender`が`E2eMonitor.ping`送信
-  4) 監視メールがSES→S3→`email-ingest`でTxHash抽出・イベント照会→DDBへ`SUCCESS`
-  5) Step FunctionsがDDB検出でSuccess終了
+  2) **DynamoDB初期レコード作成**（`status=PENDING`, `correlationResolved=false`, `balanceReceived=false`）
+  3) `prepare-message`が`correlationIdHex32/tagHex32`を組成→SQSへ
+  4) `tx-sender`が`E2eMonitor.ping`送信
+  5) **イベント通知メール**: SES→S3→`email-ingest`でTxHash抽出・イベント照会→DDBへ`correlationResolved=true`, `status=EVENT_ONLY`
+  6) **残高通知メール**: SES→S3→`email-ingest`で時間窓クエリ→最新レコードへ`balanceReceived=true`, `status=SUCCESS`
+  7) Step FunctionsがDDB検出（`correlationResolved=true AND balanceReceived=true`）でSuccess終了
+
+- DynamoDBテーブル構造
+  - **パーティションキー**: `correlationId` (STRING)
+  - **GSI_TimeOrder**: `recordType` (PK: 固定値 "E2E_TASK") + `createdAtMs` (SK) → 時系列降順クエリ用
+  - **GSI1_EventTime**: `eventBucket` (PK) + `eventEmailAtMs` (SK) → レガシー、残高通知のフォールバック用
+  - **主要属性**:
+    - `status`: PENDING | EVENT_ONLY | BALANCE_ONLY | SUCCESS
+    - `correlationResolved`: イベント通知受信済みフラグ
+    - `balanceReceived`: 残高通知受信済みフラグ
+    - `createdAt` / `createdAtMs` / `createdAtJST`: タスク起動日時（UTC / ミリ秒 / JST）
+    - `eventEmailAt` / `eventEmailAtMs` / `eventEmailAtJST`: イベント通知受信日時
+    - `balanceEmailAt` / `balanceEmailAtMs` / `balanceEmailAtJST`: 残高通知受信日時
+    - `updatedAt` / `updatedAtMs` / `updatedAtJST`: 最終更新日時
+
+- 受信メール種別（3種類）
+  1. **イベント通知**: TxIDあり → ブロックチェーンRPCでcorrelationId取得 → レコード更新
+  2. **残高通知**: TxID/correlationIdなし → 時間窓（10分）内の最新`EVENT_ONLY`レコードに紐付け
+  3. **その他メール**: 無視
+
+- 重複処理（準正常系）
+  - イベント通知が複数届いた場合: 1通目のみ処理、2通目以降は`SoftMiss/EventDuplicate`メトリクス
+  - 残高通知が複数届いた場合: 1通目のみ処理、2通目以降は`SoftMiss/BalanceDuplicate`メトリクス
+  - ConditionExpressionによる排他制御で競合回避
 
 - 手動トリガ
   - Step Functions入力は空で可（空オブジェクト）。
@@ -111,9 +136,17 @@ LOG_LEVEL=debug
   - Failures（Hard Fail）
     - メトリクス: `Failures`（5分, sum）
     - アラーム: 連続2期間（10分）で閾値≥1
-  - SoftMiss（TxID/Correlation未検出の軽微な未達）
+    - 原因例: ExplorerError、DdbError、UnexpectedError
+  - SoftMiss（軽微な未達・重複）
     - メトリクス: `SoftMiss`（5分, sum）
     - アラーム: 5分で≥3
+    - 原因例:
+      - `CorrelationIdNotFound`: イベントログからcorrelationId抽出失敗
+      - `EventRecordNotFound`: DynamoDBに対応するレコードが存在しない（通常はあり得ない）
+      - `BalanceNoCandidate`: 残高通知の紐付け候補なし
+      - `BalanceDuplicate`: 残高通知の重複（2通目以降）
+      - `EventDuplicate`: イベント通知の重複（2通目以降）
+      - `EventRaceCondition`: イベント通知の競合
   - バックアップ
     - `AWS/Lambda Errors` ≥1（5分, sum）
 

@@ -33,7 +33,17 @@ export class StorageStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // GSI for all records in time order (newest first)
+    // Used for: Console display, balance notification attachment
+    this.table.addGlobalSecondaryIndex({
+      indexName: 'GSI_TimeOrder',
+      partitionKey: { name: 'recordType', type: AttributeType.STRING },
+      sortKey: { name: 'createdAtMs', type: AttributeType.NUMBER },
+      projectionType: ProjectionType.ALL,
+    });
+
     // GSI for time-window correlation (query by eventBucket + eventEmailAtMs)
+    // Legacy: Used as fallback for balance notification
     this.table.addGlobalSecondaryIndex({
       indexName: 'GSI1_EventTime',
       partitionKey: { name: 'eventBucket', type: AttributeType.STRING },

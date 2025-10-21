@@ -20,7 +20,7 @@ const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 
 const s3 = new S3Client({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -210,6 +210,28 @@ function extractCorrelationIdFromLogs(receipt) {
   return null;
 }
 
+/**
+ * UNIX timestamp (ms) から UTC/JST/ms の3フィールドを生成
+ */
+function makeTimestampFields(epochMs, prefix) {
+  const date = new Date(epochMs);
+
+  // UTC ISO8601
+  const utc = date.toISOString();
+
+  // JST (UTC+9)
+  const jstDate = new Date(epochMs + 9 * 60 * 60 * 1000);
+  const jst = jstDate.toISOString()
+    .replace('T', ' ')
+    .replace(/\.\d{3}Z$/, ''); // "2025-10-21 21:00:00"
+
+  return {
+    [`${prefix}Ms`]: epochMs,
+    [`${prefix}`]: utc,
+    [`${prefix}JST`]: jst,
+  };
+}
+
 function makeEventBucket(epochMs) {
   const d = new Date(epochMs);
   // yyyyMMddHHmm（1分バケット）
@@ -218,81 +240,216 @@ function makeEventBucket(epochMs) {
 }
 
 async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
-  const item = {
-    correlationId,
-    txHash,
-    correlationResolved: true,
-    eventEmailAt: new Date(eventEmailAtMs).toISOString(),
-    eventEmailAtMs,
-    eventBucket: makeEventBucket(eventEmailAtMs),
-    balanceReceived: false,
-  };
-  await ddb.send(new PutCommand({ TableName: RESULTS_TABLE, Item: item }));
+  try {
+    // まず既存レコードを取得
+    const existing = await ddb.send(new GetCommand({
+      TableName: RESULTS_TABLE,
+      Key: { correlationId },
+    }));
+
+    // レコードが存在しない場合（通常はStep Functionsが先に作成するためあり得ない）
+    if (!existing.Item) {
+      logger.warn('No existing record found for correlationId (unexpected)', {
+        correlationId,
+        txHash,
+      });
+      emitMetric('SoftMiss', 'EventRecordNotFound');
+      return; // レコードが存在しないため処理スキップ
+    }
+
+    // 既にcorrelationResolved=trueの場合は重複
+    if (existing.Item.correlationResolved === true) {
+      logger.info('Event already processed (duplicate event notification)', {
+        correlationId,
+        existingTxHash: existing.Item.txHash,
+        newTxHash: txHash,
+      });
+
+      // メトリクス: イベント通知の重複
+      emitMetric('SoftMiss', 'EventDuplicate');
+
+      // txHashが異なる場合は警告
+      if (existing.Item.txHash !== txHash) {
+        logger.warn('Duplicate event with different txHash', {
+          correlationId,
+          existingTxHash: existing.Item.txHash,
+          newTxHash: txHash,
+        });
+      }
+
+      return; // 更新しない
+    }
+
+    // 新規または未処理の場合のみ更新
+    const newStatus = existing.Item?.balanceReceived === true
+      ? 'SUCCESS'      // 既に残高受信済み（順序逆転ケース）
+      : 'EVENT_ONLY';  // 残高待ち
+
+    const eventFields = makeTimestampFields(eventEmailAtMs, 'eventEmailAt');
+    const updatedFields = makeTimestampFields(Date.now(), 'updatedAt');
+
+    await ddb.send(new UpdateCommand({
+      TableName: RESULTS_TABLE,
+      Key: { correlationId },
+      UpdateExpression: `
+        SET txHash = :txHash,
+            correlationResolved = :true,
+            eventEmailAtMs = :eventMs,
+            eventEmailAt = :eventUtc,
+            eventEmailAtJST = :eventJst,
+            eventBucket = :eventBucket,
+            #status = :status,
+            updatedAtMs = :updMs,
+            updatedAt = :updUtc,
+            updatedAtJST = :updJst
+      `,
+      // ★ correlationResolvedがfalseまたは存在しない場合のみ更新
+      ConditionExpression: `
+        (correlationResolved = :false OR attribute_not_exists(correlationResolved))
+      `,
+      ExpressionAttributeNames: {
+        '#status': 'status',
+      },
+      ExpressionAttributeValues: {
+        ':txHash': txHash,
+        ':true': true,
+        ':false': false,
+        ':eventMs': eventFields.eventEmailAtMs,
+        ':eventUtc': eventFields.eventEmailAt,
+        ':eventJst': eventFields.eventEmailAtJST,
+        ':eventBucket': makeEventBucket(eventEmailAtMs),
+        ':status': newStatus,
+        ':updMs': updatedFields.updatedAtMs,
+        ':updUtc': updatedFields.updatedAt,
+        ':updJst': updatedFields.updatedAtJST,
+      },
+    }));
+
+    logger.info('Event record updated', { correlationId, status: newStatus });
+
+  } catch (e) {
+    if (e.name === 'ConditionalCheckFailedException') {
+      logger.info('Event already processed (race condition)', { correlationId });
+      emitMetric('SoftMiss', 'EventRaceCondition');
+      return;
+    }
+    throw e;
+  }
 }
 
 // バランス通知: 時間相関で最も近いイベント実行レコードに紐付け
 async function attachBalanceByTimeWindow() {
   const nowMs = Date.now();
-  const earliestMs = nowMs - 3 * 60 * 1000; // 3分前
-  const latestMs = nowMs; // 直前(0秒)
-  const buckets = [];
-  // 分境界を跨ぐので earliest 分から latest 分まで列挙
-  const startMinute = Math.floor(earliestMs / 60000);
-  const endMinute = Math.floor(latestMs / 60000);
-  for (let m = startMinute; m <= endMinute; m++) buckets.push(makeEventBucket(m * 60000));
+  const WINDOW_MINUTES = 10; // 10分窓（環境変数化推奨）
+  const earliestMs = nowMs - WINDOW_MINUTES * 60 * 1000;
 
-  let candidates = [];
-  for (const bucket of buckets) {
-    try {
-      const out = await ddb.send(new QueryCommand({
-        TableName: RESULTS_TABLE,
-        IndexName: 'GSI1_EventTime',
-        KeyConditionExpression: 'eventBucket = :b AND eventEmailAtMs BETWEEN :s AND :e',
-        ExpressionAttributeValues: {
-          ':b': bucket,
-          ':s': earliestMs,
-          ':e': latestMs,
-        },
-        ScanIndexForward: false, // 新しい順
-        Limit: 10,
-      }));
-      const items = out.Items || [];
-      candidates.push(...items);
-    } catch (e) {
-      logger.warn('GSI query failed', { bucket, error: e && e.message ? e.message : String(e) });
-    }
+  logger.info('Balance time window', {
+    windowMinutes: WINDOW_MINUTES,
+    earliestJST: makeTimestampFields(earliestMs, 'earliest').earliestJST,
+    nowJST: makeTimestampFields(nowMs, 'now').nowJST,
+  });
+
+  // GSI_TimeOrderで最新のレコードを検索
+  let result;
+  try {
+    result = await ddb.send(new QueryCommand({
+      TableName: RESULTS_TABLE,
+      IndexName: 'GSI_TimeOrder',
+      KeyConditionExpression: 'recordType = :type AND createdAtMs BETWEEN :start AND :end',
+      ExpressionAttributeValues: {
+        ':type': 'E2E_TASK',
+        ':start': earliestMs,
+        ':end': nowMs,
+      },
+      ScanIndexForward: false,  // 新しい順
+      Limit: 20,
+    }));
+  } catch (e) {
+    logger.error('GSI_TimeOrder query failed', {
+      error: e && e.message ? e.message : String(e)
+    });
+    emitMetric('Failures', 'GsiQueryError');
+    return false;
   }
 
-  // フィルタ: まだ balanceReceived でない、かつ最も近い過去
-  candidates = candidates
-    .filter((i) => i && i.correlationId && i.eventEmailAtMs <= latestMs && i.correlationResolved)
-    .sort((a, b) => b.eventEmailAtMs - a.eventEmailAtMs);
+  const candidates = (result.Items || [])
+    .filter(item =>
+      item.correlationResolved === true &&   // イベント通知済み
+      item.balanceReceived !== true          // 残高未受信
+    );
 
-  const nowIso = new Date(nowMs).toISOString();
+  if (candidates.length === 0) {
+    logger.info('No eligible record for balance (all already processed or no event yet)');
+    // メトリクス: バランス通知の空振り（SoftMiss）
+    emitMetric('SoftMiss', 'BalanceNoCandidate');
+    return false;
+  }
+
+  const balanceFields = makeTimestampFields(nowMs, 'balanceEmailAt');
+  const updatedFields = makeTimestampFields(nowMs, 'updatedAt');
+
   for (const cand of candidates) {
     try {
-      const res = await ddb.send(new UpdateCommand({
+      await ddb.send(new UpdateCommand({
         TableName: RESULTS_TABLE,
         Key: { correlationId: cand.correlationId },
-        UpdateExpression: 'SET balanceReceived = :true, balanceEmailAt = :iso, balanceEmailAtMs = :ms',
-        ConditionExpression: 'attribute_not_exists(balanceEmailAtMs) OR balanceReceived = :false',
+        UpdateExpression: `
+          SET balanceReceived = :true,
+              balanceEmailAtMs = :balMs,
+              balanceEmailAt = :balUtc,
+              balanceEmailAtJST = :balJst,
+              #status = :success,
+              updatedAtMs = :updMs,
+              updatedAt = :updUtc,
+              updatedAtJST = :updJst
+        `,
+        // ★ 重要: balanceReceivedがfalseまたは存在しない場合のみ更新
+        ConditionExpression: `
+          (balanceReceived = :false OR attribute_not_exists(balanceReceived))
+        `,
+        ExpressionAttributeNames: {
+          '#status': 'status',
+        },
         ExpressionAttributeValues: {
           ':true': true,
           ':false': false,
-          ':iso': nowIso,
-          ':ms': nowMs,
+          ':balMs': balanceFields.balanceEmailAtMs,
+          ':balUtc': balanceFields.balanceEmailAt,
+          ':balJst': balanceFields.balanceEmailAtJST,
+          ':success': 'SUCCESS',
+          ':updMs': updatedFields.updatedAtMs,
+          ':updUtc': updatedFields.updatedAt,
+          ':updJst': updatedFields.updatedAtJST,
         },
       }));
-      logger.info('Balance attached to correlation record', { correlationId: cand.correlationId });
+
+      logger.info('Balance attached successfully', {
+        correlationId: cand.correlationId,
+        createdAtJST: cand.createdAtJST,
+      });
       return true;
+
     } catch (e) {
-      // 条件に合わない/競合などは次候補へ
-      logger.debug('Balance attach candidate skipped', { correlationId: cand.correlationId, reason: e && e.message ? e.message : String(e) });
+      // ConditionalCheckFailedException = 既に他の残高通知で処理済み
+      if (e.name === 'ConditionalCheckFailedException') {
+        logger.debug('Balance attach skipped (already processed)', {
+          correlationId: cand.correlationId
+        });
+        continue; // 次候補へ
+      }
+
+      // その他のエラー
+      logger.warn('Balance attach failed', {
+        correlationId: cand.correlationId,
+        error: e && e.message ? e.message : String(e),
+      });
+      continue;
     }
   }
 
-  // 候補がない場合は情報ログのみ（必要なら暫定ハートビート）
-  logger.info('No eligible event record found for balance window; skipping attach');
+  // 全候補が既に処理済み（2通目以降の残高通知）
+  logger.info('All candidates already have balance (duplicate balance notification)');
+  emitMetric('SoftMiss', 'BalanceDuplicate');
   return false;
 }
 

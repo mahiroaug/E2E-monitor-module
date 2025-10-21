@@ -77,6 +77,35 @@ export class StateMachineStack extends Stack {
       },
     });
 
+    // Initialize DynamoDB record (create initial entry with PENDING status)
+    const initRecordFn = new NodejsFunction(this, 'InitRecordFn', {
+      runtime: Runtime.NODEJS_20_X,
+      entry: join(__dirname, '../../src/lambda/init-record/index.js'),
+      handler: 'handler',
+      memorySize: 256,
+      timeout: Duration.seconds(10),
+      environment: {
+        RESULTS_TABLE: props.table.tableName,
+      },
+      bundling: {
+        minify: true,
+        externalModules: ['aws-sdk'],
+        nodeModules: ['@aws-sdk/client-dynamodb', '@aws-sdk/lib-dynamodb'],
+      },
+    });
+    props.table.grantWriteData(initRecordFn);
+
+    const initializeRecord = new LambdaInvoke(this, 'Initialize DDB Record', {
+      lambdaFunction: initRecordFn,
+      payload: TaskInput.fromObject({
+        correlationId: JsonPath.stringAt('$.correlationId'),
+        attempt: JsonPath.stringAt('$.attempt'),
+        totalAttempts: JsonPath.stringAt('$.totalAttempts'),
+      }),
+      resultPath: JsonPath.DISCARD,
+      payloadResponseOnly: true,
+    });
+
     // Prepare message body (build bytes32 values) via Lambda
     const prepareMessageFn = new NodejsFunction(this, 'PrepareMessageFn', {
       runtime: Runtime.NODEJS_20_X,
@@ -380,6 +409,7 @@ export class StateMachineStack extends Stack {
       definition: initAttempts
         .next(emitHeartbeatMetric)
         .next(generateCorrelationId)
+        .next(initializeRecord)      // ← 初期レコード作成を追加
         .next(setDefaultTagSeed)
         .next(prepareMessage)
         .next(adoptPreparedValues)
@@ -396,6 +426,7 @@ export class StateMachineStack extends Stack {
 
     props.queue.grantSendMessages(this.machine);
     props.table.grantReadData(this.machine);
+    props.table.grantWriteData(this.machine);  // ← 初期レコード作成用の権限追加
 
     // Alarms: AttemptFailed (WARN), FinalFailed (ERROR)
     // WARNは「成功するまで維持」するため、評価ウィンドウを再試行間隔(5分)＋バタ付き防止(1分)の6分で設定
