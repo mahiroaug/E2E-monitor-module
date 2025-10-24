@@ -2,11 +2,12 @@
  * init-record Lambda
  *
  * 役割: Step Functions開始時にDynamoDBへ初期レコードを作成
- * 入力: { correlationId: string, attempt: number, totalAttempts: number }
+ * 入力: { correlationId: string, correlationIdHex?: string, attempt: number, totalAttempts: number }
  * 出力: { ok: boolean, created?: boolean, updated?: boolean }
  */
 'use strict';
 
+const { createHash } = require('crypto');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 
@@ -45,11 +46,16 @@ exports.handler = async (event) => {
   const totalAttempts = event.totalAttempts || 3;
   const nowMs = Date.now();
 
+  // correlationIdHexが渡されない場合は、correlationIdからSHA256ハッシュを生成
+  const correlationIdHex = event.correlationIdHex ||
+    `0x${createHash('sha256').update(correlationId).digest('hex')}`;
+
   const createdFields = makeTimestampFields(nowMs, 'createdAt');
   const updatedFields = makeTimestampFields(nowMs, 'updatedAt');
 
   const item = {
     correlationId,
+    correlationIdHex,  // hash値も保存
     recordType: 'E2E_TASK',
     ...createdFields,
     attempt,

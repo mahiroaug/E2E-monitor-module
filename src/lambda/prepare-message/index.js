@@ -7,13 +7,15 @@
  * 出力: { correlationIdHex32: string, tagHex32: string, messageBody: string }
  */
 
-const { randomUUID } = require('crypto');
+const { randomUUID, createHash } = require('crypto');
 
 function toBytes32HexFromString(input) {
-  const hex = Buffer.from(String(input)).toString('hex');
-  const trimmed = hex.length > 64 ? hex.slice(0, 64) : hex;
-  const padded = trimmed.padEnd(64, '0');
-  return `0x${padded}`;
+  const inputStr = String(input);
+
+  // UUIDは36文字（hexで72文字）なので必ずbytes32（64文字）を超える
+  // 一貫性のため、常にSHA256ハッシュ化して32バイトに収める
+  const hash = createHash('sha256').update(inputStr).digest('hex');
+  return `0x${hash}`;
 }
 
 exports.handler = async (event) => {

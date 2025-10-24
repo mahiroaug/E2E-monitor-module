@@ -138,10 +138,12 @@ export class StateMachineStack extends Stack {
       },
     });
 
-    // Adopt hex32 into root correlationId and messageBody from prep
+    // Adopt hex32 and messageBody from prep
+    // NOTE: correlationIdを上書きせず、元のUUID形式を保持（DDB検索に必要）
     const adoptPreparedValues = new Pass(this, 'AdoptPreparedValues', {
       parameters: {
-        correlationId: JsonPath.stringAt('$.prep.correlationIdHex32'),
+        correlationId: JsonPath.stringAt('$.correlationId'),  // 元のUUID形式を保持
+        correlationIdHex32: JsonPath.stringAt('$.prep.correlationIdHex32'),  // hex形式は別変数に
         messageBody: JsonPath.stringAt('$.prep.messageBody'),
         attempt: JsonPath.stringAt('$.attempt'),
         totalAttempts,

@@ -204,7 +204,10 @@ function extractCorrelationIdFromLogs(receipt) {
   for (const log of targetLogs) {
     const topics = Array.isArray(log.topics) ? log.topics : [];
     if (topics.length >= 2 && /^0x[0-9a-fA-F]{64}$/.test(topics[1])) {
-      return topics[1];
+      // topics[1]はhash形式のcorrelationIdHex
+      // UUIDをSHA256でハッシュ化したものなので、デコードできない
+      const correlationIdHex = topics[1]; // hash形式（0x + 64文字）
+      return { correlationIdHex };
     }
   }
   return null;
@@ -239,29 +242,43 @@ function makeEventBucket(epochMs) {
   return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
 }
 
-async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
+async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
   try {
-    // まず既存レコードを取得
-    const existing = await ddb.send(new GetCommand({
+    // correlationIdHexからcorrelationIdを逆引きするため、GSI_TimeOrderで最近のレコードを検索
+    const queryResult = await ddb.send(new QueryCommand({
       TableName: RESULTS_TABLE,
-      Key: { correlationId },
+      IndexName: 'GSI_TimeOrder',
+      KeyConditionExpression: 'recordType = :recordType',
+      FilterExpression: 'correlationIdHex = :correlationIdHex AND correlationResolved = :false',
+      ExpressionAttributeValues: {
+        ':recordType': 'E2E_TASK',
+        ':correlationIdHex': correlationIdHex,
+        ':false': false,
+      },
+      ScanIndexForward: false,  // 新しい順
+      Limit: 10,  // 最近の10件を取得
     }));
 
-    // レコードが存在しない場合（通常はStep Functionsが先に作成するためあり得ない）
-    if (!existing.Item) {
-      logger.warn('No existing record found for correlationId (unexpected)', {
-        correlationId,
+    // マッチするレコードがない場合
+    if (!queryResult.Items || queryResult.Items.length === 0) {
+      logger.warn('No existing record found for correlationIdHex (unexpected)', {
+        correlationIdHex,
         txHash,
       });
       emitMetric('SoftMiss', 'EventRecordNotFound');
       return; // レコードが存在しないため処理スキップ
     }
 
+    // 最新のレコードを使用
+    const existing = queryResult.Items[0];
+    const correlationId = existing.correlationId;
+
     // 既にcorrelationResolved=trueの場合は重複
-    if (existing.Item.correlationResolved === true) {
+    if (existing.correlationResolved === true) {
       logger.info('Event already processed (duplicate event notification)', {
         correlationId,
-        existingTxHash: existing.Item.txHash,
+        correlationIdHex,
+        existingTxHash: existing.txHash,
         newTxHash: txHash,
       });
 
@@ -269,10 +286,11 @@ async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
       emitMetric('SoftMiss', 'EventDuplicate');
 
       // txHashが異なる場合は警告
-      if (existing.Item.txHash !== txHash) {
+      if (existing.txHash !== txHash) {
         logger.warn('Duplicate event with different txHash', {
           correlationId,
-          existingTxHash: existing.Item.txHash,
+          correlationIdHex,
+          existingTxHash: existing.txHash,
           newTxHash: txHash,
         });
       }
@@ -281,7 +299,7 @@ async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
     }
 
     // 新規または未処理の場合のみ更新
-    const newStatus = existing.Item?.balanceReceived === true
+    const newStatus = existing?.balanceReceived === true
       ? 'SUCCESS'      // 既に残高受信済み（順序逆転ケース）
       : 'EVENT_ONLY';  // 残高待ち
 
@@ -293,6 +311,7 @@ async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
       Key: { correlationId },
       UpdateExpression: `
         SET txHash = :txHash,
+            correlationIdHex = :correlationIdHex,
             correlationResolved = :true,
             eventEmailAtMs = :eventMs,
             eventEmailAt = :eventUtc,
@@ -312,6 +331,7 @@ async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
       },
       ExpressionAttributeValues: {
         ':txHash': txHash,
+        ':correlationIdHex': correlationIdHex,
         ':true': true,
         ':false': false,
         ':eventMs': eventFields.eventEmailAtMs,
@@ -325,7 +345,7 @@ async function upsertEventRecord(correlationId, txHash, eventEmailAtMs) {
       },
     }));
 
-    logger.info('Event record updated', { correlationId, status: newStatus });
+    logger.info('Event record updated', { correlationId, correlationIdHex, status: newStatus });
 
   } catch (e) {
     if (e.name === 'ConditionalCheckFailedException') {
@@ -585,18 +605,19 @@ exports.handler = async (event, context) => {
       }
       logger.debug('Explorer receipt fetched');
 
-      const correlationId = extractCorrelationIdFromLogs(receipt);
-      if (!correlationId) {
+      const extractResult = extractCorrelationIdFromLogs(receipt);
+      if (!extractResult) {
         logger.warn('CorrelationId not found in logs', { txHash });
         emitMetric('SoftMiss', 'CorrelationIdNotFound');
         continue;
       }
-      logger.info('CorrelationId extracted', { correlationId });
+      const { correlationIdHex } = extractResult;
+      logger.info('CorrelationIdHex extracted', { correlationIdHex });
 
       try {
         const nowMs = Date.now();
         logger.info('Upserting event record to DynamoDB', { table: RESULTS_TABLE });
-        await upsertEventRecord(correlationId, txHash, nowMs);
+        await upsertEventRecord(correlationIdHex, txHash, nowMs);
         logger.info('DynamoDB write success');
       } catch (e) {
         logger.error('DynamoDB PutItem failed', { error: e && e.message ? e.message : String(e) });

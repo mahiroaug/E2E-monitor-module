@@ -75,31 +75,41 @@ LOG_LEVEL=debug
 
 ## 運用
 - 正常フロー
-  1) Step FunctionsがUUIDで`correlationId`生成
+  1) Step FunctionsがUUIDで`correlationId`生成（例：85f4ee45-2d79-4429-8137-17a5df8a164e）
   2) **DynamoDB初期レコード作成**（`status=PENDING`, `correlationResolved=false`, `balanceReceived=false`）
-  3) `prepare-message`が`correlationIdHex32/tagHex32`を組成→SQSへ
-  4) `tx-sender`が`E2eMonitor.ping`送信
-  5) **イベント通知メール**: SES→S3→`email-ingest`でTxHash抽出・イベント照会→DDBへ`correlationResolved=true`, `status=EVENT_ONLY`
+     - `correlationId`: UUID形式
+     - `correlationIdHex`: UUID をSHA256ハッシュ化したbytes32形式（0x + 64文字）
+  3) `prepare-message`が`correlationIdHex32/tagHex32`を組成（SHA256ハッシュ化）→SQSへ
+  4) `tx-sender`が`E2eMonitor.ping`送信（bytes32形式のhash値をスマートコントラクトに送信）
+  5) **イベント通知メール**: SES→S3→`email-ingest`でTxHash抽出・イベント照会→hash値取得→GSI検索でレコード特定→DDBへ`correlationResolved=true`, `status=EVENT_ONLY`
   6) **残高通知メール**: SES→S3→`email-ingest`で時間窓クエリ→最新レコードへ`balanceReceived=true`, `status=SUCCESS`
   7) Step FunctionsがDDB検出（`correlationResolved=true AND balanceReceived=true`）でSuccess終了
 
 - DynamoDBテーブル構造
-  - **パーティションキー**: `correlationId` (STRING)
+  - **パーティションキー**: `correlationId` (STRING) - UUID形式
   - **GSI_TimeOrder**: `recordType` (PK: 固定値 "E2E_TASK") + `createdAtMs` (SK) → 時系列降順クエリ用
   - **GSI1_EventTime**: `eventBucket` (PK) + `eventEmailAtMs` (SK) → レガシー、残高通知のフォールバック用
   - **主要属性**:
     - `status`: PENDING | EVENT_ONLY | BALANCE_ONLY | SUCCESS
+    - `correlationId`: タスク識別子（UUID形式、例：85f4ee45-2d79-4429-8137-17a5df8a164e）
+    - `correlationIdHex`: 同上のhex32形式（例：0x38356634656534352d...）- イベント通知時に記録
     - `correlationResolved`: イベント通知受信済みフラグ
     - `balanceReceived`: 残高通知受信済みフラグ
+    - `txHash`: トランザクションハッシュ
     - `createdAt` / `createdAtMs` / `createdAtJST`: タスク起動日時（UTC / ミリ秒 / JST）
     - `eventEmailAt` / `eventEmailAtMs` / `eventEmailAtJST`: イベント通知受信日時
     - `balanceEmailAt` / `balanceEmailAtMs` / `balanceEmailAtJST`: 残高通知受信日時
     - `updatedAt` / `updatedAtMs` / `updatedAtJST`: 最終更新日時
 
 - 受信メール種別（3種類）
-  1. **イベント通知**: TxIDあり → ブロックチェーンRPCでcorrelationId取得 → レコード更新
+  1. **イベント通知**: TxIDあり → ブロックチェーンRPCでcorrelationIdHex（hash値）取得 → GSI検索でレコード特定 → 更新
   2. **残高通知**: TxID/correlationIdなし → 時間窓（10分）内の最新`EVENT_ONLY`レコードに紐付け
   3. **その他メール**: 無視
+
+- correlationId形式の変換
+  - **UUID形式**（36文字）: DynamoDBのパーティションキー、内部管理用
+  - **bytes32/hash形式**（0x + 64文字）: UUIDをSHA256でハッシュ化、スマートコントラクト送信用
+  - 理由: UUIDは36文字（hex変換で72文字）でbytes32（64文字）に収まらないため、SHA256ハッシュ化して32バイトに統一
 
 - 重複処理（準正常系）
   - イベント通知が複数届いた場合: 1通目のみ処理、2通目以降は`SoftMiss/EventDuplicate`メトリクス
