@@ -299,6 +299,9 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
     }
 
     // 新規または未処理の場合のみ更新
+    // ステータス判定:
+    // - 残高受信済み（BALANCE_ONLY）→ SUCCESS（順序逆転ケース）
+    // - 残高未受信 → EVENT_ONLY（正常ケース）
     const newStatus = existing?.balanceReceived === true
       ? 'SUCCESS'      // 既に残高受信済み（順序逆転ケース）
       : 'EVENT_ONLY';  // 残高待ち
@@ -345,7 +348,12 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
       },
     }));
 
-    logger.info('Event record updated', { correlationId, correlationIdHex, status: newStatus });
+    logger.info('Event record updated', {
+      correlationId,
+      correlationIdHex,
+      status: newStatus,
+      balanceAlreadyReceived: existing?.balanceReceived === true,
+    });
 
   } catch (e) {
     if (e.name === 'ConditionalCheckFailedException') {
@@ -392,24 +400,44 @@ async function attachBalanceByTimeWindow() {
     return false;
   }
 
-  const candidates = (result.Items || [])
+  // 候補レコードを優先順位付きで抽出
+  // 第1優先: EVENT_ONLY（イベント通知済み、残高未受信）
+  // 第2優先: PENDING（イベント未受信、残高未受信）- 順序逆転ケース対応
+  const eventOnlyCandidates = (result.Items || [])
     .filter(item =>
       item.correlationResolved === true &&   // イベント通知済み
       item.balanceReceived !== true          // 残高未受信
     );
 
+  const pendingCandidates = (result.Items || [])
+    .filter(item =>
+      item.correlationResolved !== true &&   // イベント未受信
+      item.balanceReceived !== true          // 残高未受信
+    );
+
+  const candidates = [...eventOnlyCandidates, ...pendingCandidates];
+
   if (candidates.length === 0) {
-    logger.info('No eligible record for balance (all already processed or no event yet)');
+    logger.info('No eligible record for balance (all already processed)');
     // メトリクス: バランス通知の空振り（SoftMiss）
     emitMetric('SoftMiss', 'BalanceNoCandidate');
     return false;
   }
+
+  logger.info('Balance candidates found', {
+    eventOnly: eventOnlyCandidates.length,
+    pending: pendingCandidates.length,
+    total: candidates.length,
+  });
 
   const balanceFields = makeTimestampFields(nowMs, 'balanceEmailAt');
   const updatedFields = makeTimestampFields(nowMs, 'updatedAt');
 
   for (const cand of candidates) {
     try {
+      // ステータス判定: イベント通知済みならSUCCESS、未受信ならBALANCE_ONLY
+      const newStatus = cand.correlationResolved === true ? 'SUCCESS' : 'BALANCE_ONLY';
+
       await ddb.send(new UpdateCommand({
         TableName: RESULTS_TABLE,
         Key: { correlationId: cand.correlationId },
@@ -418,7 +446,7 @@ async function attachBalanceByTimeWindow() {
               balanceEmailAtMs = :balMs,
               balanceEmailAt = :balUtc,
               balanceEmailAtJST = :balJst,
-              #status = :success,
+              #status = :newStatus,
               updatedAtMs = :updMs,
               updatedAt = :updUtc,
               updatedAtJST = :updJst
@@ -436,7 +464,7 @@ async function attachBalanceByTimeWindow() {
           ':balMs': balanceFields.balanceEmailAtMs,
           ':balUtc': balanceFields.balanceEmailAt,
           ':balJst': balanceFields.balanceEmailAtJST,
-          ':success': 'SUCCESS',
+          ':newStatus': newStatus,
           ':updMs': updatedFields.updatedAtMs,
           ':updUtc': updatedFields.updatedAt,
           ':updJst': updatedFields.updatedAtJST,
@@ -445,6 +473,8 @@ async function attachBalanceByTimeWindow() {
 
       logger.info('Balance attached successfully', {
         correlationId: cand.correlationId,
+        status: newStatus,
+        eventReceived: cand.correlationResolved === true,
         createdAtJST: cand.createdAtJST,
       });
       return true;

@@ -74,7 +74,7 @@ LOG_LEVEL=debug
 
 
 ## 運用
-- 正常フロー
+- 正常フロー（イベント通知→残高通知の順）
   1) Step FunctionsがUUIDで`correlationId`生成（例：85f4ee45-2d79-4429-8137-17a5df8a164e）
   2) **DynamoDB初期レコード作成**（`status=PENDING`, `correlationResolved=false`, `balanceReceived=false`）
      - `correlationId`: UUID形式
@@ -82,19 +82,30 @@ LOG_LEVEL=debug
   3) `prepare-message`が`correlationIdHex32/tagHex32`を組成（SHA256ハッシュ化）→SQSへ
   4) `tx-sender`が`E2eMonitor.ping`送信（bytes32形式のhash値をスマートコントラクトに送信）
   5) **イベント通知メール**: SES→S3→`email-ingest`でTxHash抽出・イベント照会→hash値取得→GSI検索でレコード特定→DDBへ`correlationResolved=true`, `status=EVENT_ONLY`
-  6) **残高通知メール**: SES→S3→`email-ingest`で時間窓クエリ→最新レコードへ`balanceReceived=true`, `status=SUCCESS`
+  6) **残高通知メール**: SES→S3→`email-ingest`で時間窓クエリ→最新`EVENT_ONLY`レコードへ`balanceReceived=true`, `status=SUCCESS`
   7) Step FunctionsがDDB検出（`correlationResolved=true AND balanceReceived=true`）でSuccess終了
+
+- 順序逆転フロー（残高通知→イベント通知の順）
+  1) Step FunctionsがUUIDで`correlationId`生成 → DDB初期レコード作成（`status=PENDING`）
+  2) `tx-sender`が`E2eMonitor.ping`送信
+  3) **残高通知メール（先着）**: SES→S3→`email-ingest`で時間窓クエリ→最新`PENDING`レコードへ`balanceReceived=true`, `status=BALANCE_ONLY`
+  4) **イベント通知メール（後着）**: SES→S3→`email-ingest`でhash値取得→GSI検索→`BALANCE_ONLY`レコードを特定→`correlationResolved=true`, `status=SUCCESS`
+  5) Step FunctionsがDDB検出（両方true）でSuccess終了
 
 - DynamoDBテーブル構造
   - **パーティションキー**: `correlationId` (STRING) - UUID形式
   - **GSI_TimeOrder**: `recordType` (PK: 固定値 "E2E_TASK") + `createdAtMs` (SK) → 時系列降順クエリ用
   - **GSI1_EventTime**: `eventBucket` (PK) + `eventEmailAtMs` (SK) → レガシー、残高通知のフォールバック用
   - **主要属性**:
-    - `status`: PENDING | EVENT_ONLY | BALANCE_ONLY | SUCCESS
+    - `status`: タスク進捗状態
+      - `PENDING`: 初期状態（イベント・残高とも未受信）
+      - `EVENT_ONLY`: イベント通知のみ受信済み（正常フロー）
+      - `BALANCE_ONLY`: 残高通知のみ受信済み（順序逆転ケース）
+      - `SUCCESS`: 両方受信完了（Step Functions成功判定）
     - `correlationId`: タスク識別子（UUID形式、例：85f4ee45-2d79-4429-8137-17a5df8a164e）
-    - `correlationIdHex`: 同上のhex32形式（例：0x38356634656534352d...）- イベント通知時に記録
-    - `correlationResolved`: イベント通知受信済みフラグ
-    - `balanceReceived`: 残高通知受信済みフラグ
+    - `correlationIdHex`: 同上をSHA256ハッシュ化したbytes32形式（例：0x3f2a8b...）- 初期レコード作成時に生成
+    - `correlationResolved`: イベント通知受信済みフラグ（boolean）
+    - `balanceReceived`: 残高通知受信済みフラグ（boolean）
     - `txHash`: トランザクションハッシュ
     - `createdAt` / `createdAtMs` / `createdAtJST`: タスク起動日時（UTC / ミリ秒 / JST）
     - `eventEmailAt` / `eventEmailAtMs` / `eventEmailAtJST`: イベント通知受信日時
@@ -102,8 +113,9 @@ LOG_LEVEL=debug
     - `updatedAt` / `updatedAtMs` / `updatedAtJST`: 最終更新日時
 
 - 受信メール種別（3種類）
-  1. **イベント通知**: TxIDあり → ブロックチェーンRPCでcorrelationIdHex（hash値）取得 → GSI検索でレコード特定 → 更新
-  2. **残高通知**: TxID/correlationIdなし → 時間窓（10分）内の最新`EVENT_ONLY`レコードに紐付け
+  1. **イベント通知**: TxIDあり → ブロックチェーンRPCでcorrelationIdHex（hash値）取得 → GSI検索でレコード特定 → `correlationResolved=true`に更新
+  2. **残高通知**: TxID/correlationIdなし → 時間窓（10分）内の最新レコード（`EVENT_ONLY`または`PENDING`）に紐付け → `balanceReceived=true`に更新
+     - 優先順位: 第1優先=`EVENT_ONLY`、第2優先=`PENDING`（順序逆転ケース対応）
   3. **その他メール**: 無視
 
 - correlationId形式の変換
@@ -174,6 +186,25 @@ LOG_LEVEL=debug
 
 ## ログ
 - 保持期間: 1年（Step Functions / email-ingest / tx-sender）
+
+## DynamoDBコンソールでの確認方法
+
+### 最新レコードから順に表示する方法
+1. DynamoDBコンソールでテーブル `e2emm-results-<stage>` を開く
+2. 「項目を調査」タブを選択
+3. 「Scan/Query items」を **「Query」** に変更
+4. 「インデックス」で **`GSI_TimeOrder`** を選択
+5. パーティションキー値: `recordType` = `E2E_TASK`
+6. 「並べ替え順序」を **「降順」** に設定
+7. 「実行」をクリック
+
+これで最新のタスク（`createdAtMs`降順）から表示されます。
+
+### 特定のレコードを検索
+- パーティションキー（`correlationId`）が分かっている場合:
+  1. 「Scan/Query items」を **「Query」** に変更（インデックスは「テーブル」のまま）
+  2. `correlationId` に該当のUUID文字列を入力
+  3. 「実行」をクリック
 
 ## トラブルシュート（要点）
 - 受信しない
