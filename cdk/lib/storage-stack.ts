@@ -31,6 +31,7 @@ export class StorageStack extends Stack {
       partitionKey: { name: 'correlationId', type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY,
+      timeToLiveAttribute: 'ttl', // TTL属性を有効化（5年後に自動削除）
     });
 
     // GSI for all records in time order (newest first)

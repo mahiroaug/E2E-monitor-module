@@ -29,6 +29,40 @@ export interface StateMachineStackProps extends StackProps {
   notificationTopic: Topic;
 }
 
+/**
+ * EVENT_RATE_MINUTESの値に基づいてcron式を生成
+ * 例: 15分 → 毎時00分、15分、30分、45分
+ *     30分 → 毎時00分、30分
+ *     60分 → 毎時00分
+ *     120分 → 0時、2時、4時...（2時間ごと）
+ */
+function generateCronExpression(rateMinutes: number): string {
+  // 60分を割り切る値で、かつ60分以下の場合
+  if (rateMinutes <= 60 && 60 % rateMinutes === 0) {
+    const intervals: number[] = [];
+    for (let i = 0; i < 60; i += rateMinutes) {
+      intervals.push(i);
+    }
+    const minuteList = intervals.join(',');
+    return `cron(${minuteList} * * * ? *)`;
+  }
+
+  // 60分より大きい場合（120分など）は、時間単位で間隔を設定
+  // 120分 = 2時間ごと → 0時、2時、4時...
+  if (rateMinutes > 60 && rateMinutes % 60 === 0) {
+    const hourInterval = rateMinutes / 60;
+    const hours: number[] = [];
+    for (let i = 0; i < 24; i += hourInterval) {
+      hours.push(i);
+    }
+    const hourList = hours.join(',');
+    return `cron(0 ${hourList} * * ? *)`;
+  }
+
+  // その他の場合は毎時00分（フォールバック）
+  return 'cron(0 * * * ? *)';
+}
+
 export class StateMachineStack extends Stack {
   public readonly machine: StateMachine;
 
@@ -543,9 +577,16 @@ export class StateMachineStack extends Stack {
     attemptFailedPulseAlarm.addAlarmAction(new SnsAction(props.notificationTopic));
     Tags.of(attemptFailedPulseAlarm).add('severity', 'WARN');
 
-    // EventBridge schedule (disabled by default - input requires correlationIdHex32/tagHex32)
+    // EventBridge schedule: EVENT_RATE_MINUTESの値に基づいて動的にcron式を生成
+    // 例: 15分 → 毎時00分、15分、30分、45分
+    //     30分 → 毎時00分、30分
+    //     60分 → 毎時00分
+    //     120分 → 0時、2時、4時...（2時間ごと）
+    // デプロイ後、次の指定時刻のうち最も近い時刻から開始される
+    // 注意: EventBridgeのcron式はUTC時間で動作します
+    const cronExpression = generateCronExpression(eventRateMinutes);
     const rule = new Rule(this, 'E2eScheduleRule', {
-      schedule: Schedule.rate(Duration.minutes(eventRateMinutes)),
+      schedule: Schedule.expression(cronExpression),
       enabled: true,
     });
     rule.addTarget(new SfnStateMachine(this.machine, {

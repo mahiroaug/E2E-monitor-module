@@ -309,6 +309,11 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
     const eventFields = makeTimestampFields(eventEmailAtMs, 'eventEmailAt');
     const updatedFields = makeTimestampFields(Date.now(), 'updatedAt');
 
+    // TTL: createdAtMsから5年後のUnixタイムスタンプ（秒単位）
+    const existingCreatedAtMs = existing.createdAtMs || Date.now();
+    const TTL_SECONDS_5_YEARS = 5 * 365 * 24 * 60 * 60;
+    const ttl = Math.floor(existingCreatedAtMs / 1000) + TTL_SECONDS_5_YEARS;
+
     await ddb.send(new UpdateCommand({
       TableName: RESULTS_TABLE,
       Key: { correlationId },
@@ -323,7 +328,8 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
             #status = :status,
             updatedAtMs = :updMs,
             updatedAt = :updUtc,
-            updatedAtJST = :updJst
+            updatedAtJST = :updJst,
+            ttl = :ttl
       `,
       // ★ correlationResolvedがfalseまたは存在しない場合のみ更新
       ConditionExpression: `
@@ -345,6 +351,7 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
         ':updMs': updatedFields.updatedAtMs,
         ':updUtc': updatedFields.updatedAt,
         ':updJst': updatedFields.updatedAtJST,
+        ':ttl': ttl,
       },
     }));
 
@@ -438,6 +445,11 @@ async function attachBalanceByTimeWindow() {
       // ステータス判定: イベント通知済みならSUCCESS、未受信ならBALANCE_ONLY
       const newStatus = cand.correlationResolved === true ? 'SUCCESS' : 'BALANCE_ONLY';
 
+      // TTL: createdAtMsから5年後のUnixタイムスタンプ（秒単位）
+      const existingCreatedAtMs = cand.createdAtMs || nowMs;
+      const TTL_SECONDS_5_YEARS = 5 * 365 * 24 * 60 * 60;
+      const ttl = Math.floor(existingCreatedAtMs / 1000) + TTL_SECONDS_5_YEARS;
+
       await ddb.send(new UpdateCommand({
         TableName: RESULTS_TABLE,
         Key: { correlationId: cand.correlationId },
@@ -449,7 +461,8 @@ async function attachBalanceByTimeWindow() {
               #status = :newStatus,
               updatedAtMs = :updMs,
               updatedAt = :updUtc,
-              updatedAtJST = :updJst
+              updatedAtJST = :updJst,
+              ttl = :ttl
         `,
         // ★ 重要: balanceReceivedがfalseまたは存在しない場合のみ更新
         ConditionExpression: `
@@ -468,6 +481,7 @@ async function attachBalanceByTimeWindow() {
           ':updMs': updatedFields.updatedAtMs,
           ':updUtc': updatedFields.updatedAt,
           ':updJst': updatedFields.updatedAtJST,
+          ':ttl': ttl,
         },
       }));
 

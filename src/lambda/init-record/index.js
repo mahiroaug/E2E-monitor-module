@@ -9,7 +9,7 @@
 
 const { createHash } = require('crypto');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, UpdateCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const RESULTS_TABLE = process.env.RESULTS_TABLE || '';
@@ -53,6 +53,11 @@ exports.handler = async (event) => {
   const createdFields = makeTimestampFields(nowMs, 'createdAt');
   const updatedFields = makeTimestampFields(nowMs, 'updatedAt');
 
+  // TTL: 5年後のUnixタイムスタンプ（秒単位）
+  // 5年 = 5 * 365 * 24 * 60 * 60 = 157,680,000秒
+  const TTL_SECONDS_5_YEARS = 5 * 365 * 24 * 60 * 60;
+  const ttl = Math.floor(nowMs / 1000) + TTL_SECONDS_5_YEARS;
+
   const item = {
     correlationId,
     correlationIdHex,  // hash値も保存
@@ -64,6 +69,7 @@ exports.handler = async (event) => {
     correlationResolved: false,
     balanceReceived: false,
     ...updatedFields,
+    ttl, // TTL属性（5年後に自動削除）
   };
 
   try {
@@ -94,6 +100,17 @@ exports.handler = async (event) => {
         attempt,
       }));
 
+      // 既存レコードを取得してcreatedAtMsからttlを計算
+      const existingRecord = await ddb.send(new GetCommand({
+        TableName: RESULTS_TABLE,
+        Key: { correlationId },
+      }));
+
+      const existingCreatedAtMs = existingRecord.Item?.createdAtMs || nowMs;
+      // TTL: createdAtMsから5年後のUnixタイムスタンプ（秒単位）
+      const TTL_SECONDS_5_YEARS = 5 * 365 * 24 * 60 * 60;
+      const ttl = Math.floor(existingCreatedAtMs / 1000) + TTL_SECONDS_5_YEARS;
+
       await ddb.send(new UpdateCommand({
         TableName: RESULTS_TABLE,
         Key: { correlationId },
@@ -102,7 +119,8 @@ exports.handler = async (event) => {
               totalAttempts = :totalAttempts,
               updatedAtMs = :updMs,
               updatedAt = :updUtc,
-              updatedAtJST = :updJst
+              updatedAtJST = :updJst,
+              ttl = :ttl
         `,
         ExpressionAttributeValues: {
           ':attempt': attempt,
@@ -110,6 +128,7 @@ exports.handler = async (event) => {
           ':updMs': updatedFields.updatedAtMs,
           ':updUtc': updatedFields.updatedAt,
           ':updJst': updatedFields.updatedAtJST,
+          ':ttl': ttl,
         },
       }));
 
