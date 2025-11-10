@@ -8,7 +8,7 @@
 import { Stack, StackProps, Duration, RemovalPolicy, Tags } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Queue, DeadLetterQueue } from 'aws-cdk-lib/aws-sqs';
-import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
@@ -32,6 +32,8 @@ export class MessagingStack extends Stack {
     super(scope, id, props);
 
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
+    // X-Ray Tracing設定（環境変数で制御、デフォルトは有効）
+    const enableXRayTracing = process.env.ENABLE_XRAY_TRACING !== 'false';
     this.dlq = new Queue(this, 'Dlq', {
       queueName: `e2emm-main-dlq-${stage}`,
       retentionPeriod: Duration.days(14),
@@ -52,6 +54,7 @@ export class MessagingStack extends Stack {
       functionName: `e2emm-tx-sender-${stage}`,
       memorySize: 512,
       timeout: Duration.seconds(180),
+      tracing: enableXRayTracing ? Tracing.ACTIVE : Tracing.DISABLED,
       logRetention: RetentionDays.ONE_YEAR,
       bundling: { minify: true, externalModules: ['aws-sdk'] },
       environment: {

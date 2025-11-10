@@ -49,6 +49,9 @@ EXPLORER_API_KEY=
 
 ### ロギング設定
 LOG_LEVEL=debug
+
+### X-Ray Tracing設定
+ENABLE_XRAY_TRACING=true  # X-Ray Tracingを有効化（デフォルト: true、無効化する場合は false）
 ```
 
 

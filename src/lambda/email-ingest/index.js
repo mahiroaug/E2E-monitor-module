@@ -329,7 +329,7 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
             updatedAtMs = :updMs,
             updatedAt = :updUtc,
             updatedAtJST = :updJst,
-            ttl = :ttl
+            #ttl = :ttl
       `,
       // ★ correlationResolvedがfalseまたは存在しない場合のみ更新
       ConditionExpression: `
@@ -337,6 +337,7 @@ async function upsertEventRecord(correlationIdHex, txHash, eventEmailAtMs) {
       `,
       ExpressionAttributeNames: {
         '#status': 'status',
+        '#ttl': 'ttl',
       },
       ExpressionAttributeValues: {
         ':txHash': txHash,
@@ -462,7 +463,7 @@ async function attachBalanceByTimeWindow() {
               updatedAtMs = :updMs,
               updatedAt = :updUtc,
               updatedAtJST = :updJst,
-              ttl = :ttl
+              #ttl = :ttl
         `,
         // ★ 重要: balanceReceivedがfalseまたは存在しない場合のみ更新
         ConditionExpression: `
@@ -470,6 +471,7 @@ async function attachBalanceByTimeWindow() {
         `,
         ExpressionAttributeNames: {
           '#status': 'status',
+          '#ttl': 'ttl',
         },
         ExpressionAttributeValues: {
           ':true': true,

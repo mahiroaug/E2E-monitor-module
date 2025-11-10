@@ -120,8 +120,11 @@ exports.handler = async (event) => {
               updatedAtMs = :updMs,
               updatedAt = :updUtc,
               updatedAtJST = :updJst,
-              ttl = :ttl
+              #ttl = :ttl
         `,
+        ExpressionAttributeNames: {
+          '#ttl': 'ttl',
+        },
         ExpressionAttributeValues: {
           ':attempt': attempt,
           ':totalAttempts': totalAttempts,

@@ -19,7 +19,7 @@ import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Rule, Schedule, RuleTargetInput } from 'aws-cdk-lib/aws-events';
 import { SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
-import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
 import { TaskInput } from 'aws-cdk-lib/aws-stepfunctions';
 import { join } from 'path';
 
@@ -71,6 +71,8 @@ export class StateMachineStack extends Stack {
 
     // Stage and schedule configuration (defined early for use in metrics dimensions)
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
+    // X-Ray Tracing設定（環境変数で制御、デフォルトは有効）
+    const enableXRayTracing = process.env.ENABLE_XRAY_TRACING !== 'false';
     const rateFromEnv = Number(process.env.EVENT_RATE_MINUTES || '');
     const eventRateMinutes = Number.isFinite(rateFromEnv) && rateFromEnv > 0 ? Math.floor(rateFromEnv) : 180;
     const totalAttemptsFromEnv = Number(process.env.SF_TOTAL_ATTEMPTS || '');
@@ -118,6 +120,7 @@ export class StateMachineStack extends Stack {
       handler: 'handler',
       memorySize: 256,
       timeout: Duration.seconds(10),
+      tracing: enableXRayTracing ? Tracing.ACTIVE : Tracing.DISABLED,
       environment: {
         RESULTS_TABLE: props.table.tableName,
       },
@@ -147,6 +150,7 @@ export class StateMachineStack extends Stack {
       handler: 'handler',
       memorySize: 256,
       timeout: Duration.seconds(10),
+      tracing: enableXRayTracing ? Tracing.ACTIVE : Tracing.DISABLED,
       bundling: { minify: true, externalModules: ['aws-sdk'] },
     });
 
@@ -454,6 +458,7 @@ export class StateMachineStack extends Stack {
         .next(getItemCorrFirst)
         .next(checkFound),
       timeout: Duration.minutes(timeoutMinutes),
+      tracingEnabled: enableXRayTracing,
       logs: {
         destination: logGroup,
         level: LogLevel.ALL,

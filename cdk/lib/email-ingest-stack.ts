@@ -11,7 +11,7 @@ import { Duration, Stack, StackProps, Tags } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Topic } from 'aws-cdk-lib/aws-sns';
-import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { join } from 'path';
@@ -34,6 +34,8 @@ export class EmailIngestStack extends Stack {
     super(scope, id, props);
 
     const stage = this.node.tryGetContext('stage') ?? process.env.STAGE ?? 'dev';
+    // X-Ray Tracing設定（環境変数で制御、デフォルトは有効）
+    const enableXRayTracing = process.env.ENABLE_XRAY_TRACING !== 'false';
     this.parserFn = new NodejsFunction(this, 'EmailParserFn', {
       runtime: Runtime.NODEJS_20_X,
       entry: join(__dirname, '../../src/lambda/email-ingest/index.js'),
@@ -41,6 +43,7 @@ export class EmailIngestStack extends Stack {
       functionName: `e2emm-email-ingest-${stage}`,
       timeout: Duration.seconds(60),
       memorySize: 512,
+      tracing: enableXRayTracing ? Tracing.ACTIVE : Tracing.DISABLED,
       bundling: {
         minify: true,
         externalModules: ['aws-sdk'],
