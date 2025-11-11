@@ -187,6 +187,17 @@ ENABLE_XRAY_TRACING=true  # X-Ray Tracingを有効化（デフォルト: true、
   - 総タイムアウト: `5 * SF_TOTAL_ATTEMPTS + 1` 分
   - AttemptFailed（WARN）は試行失敗ごと、FinalFailed（ERROR）は全試行失敗時に発火
 
+## バックアップ
+- DynamoDB: ポイントインタイム復旧（PITR）を有効化
+  - 過去35日間の任意の時点に復旧可能
+  - 誤削除やデータ破損時の復旧に使用
+
+## データ保持期間
+- DynamoDB: TTL（Time To Live）を有効化
+  - レコード作成から5年後に自動削除
+  - `ttl`属性にUnixタイムスタンプ（秒単位）を設定
+  - 削除は48時間以内に実行される（バッチ処理のため）
+
 ## ログ
 - 保持期間: 1年（Step Functions / email-ingest / tx-sender）
 

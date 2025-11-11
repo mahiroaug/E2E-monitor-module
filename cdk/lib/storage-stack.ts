@@ -32,6 +32,7 @@ export class StorageStack extends Stack {
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY,
       timeToLiveAttribute: 'ttl', // TTL属性を有効化（5年後に自動削除）
+      pointInTimeRecovery: true, // ポイントインタイム復旧（PITR）を有効化
     });
 
     // GSI for all records in time order (newest first)
